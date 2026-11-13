@@ -271,6 +271,10 @@ Node spec (JSON object). Common fields:
 - strokes: same format as fills (solid/gradient only); strokeWeight; strokeAlign: INSIDE|OUTSIDE|CENTER
 - cornerRadius (number) or topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius
 - effects: [{type:"DROP_SHADOW"|"INNER_SHADOW",color:"#hex",opacity?,x,y,blur,spread?}] or [{type:"LAYER_BLUR",blur}]
+- type SVG: {type:"SVG", svg:"<svg ...>", recolor:"light/foreground", name, x, y}. Imports the SVG (currentColor becomes black) and, with "recolor", binds every stroke and solid fill inside it to that color variable. Put SVGs inside a COMPONENT to make an icon.
+- effects may have colorVariable:"light/ring" to bind the color to a variable (a focus ring is two DROP_SHADOW effects with spread 2 and 4, y 0, blur 0).
+- description (COMPONENT / COMPONENT_SET): text shown in Figma, used for the level ("Level: atom").
+- textStyle: name of a local text style, e.g. "text/sm" (see figma_create_text_style)
 - effectStyle: name of a local effect style, e.g. "elevation/2" (see figma_list_styles, figma_create_effect_style)
 - properties (INSTANCE only): component properties, e.g. {variant:"outline", disabled:"true"}
 - clipsContent (frames)
@@ -314,6 +318,7 @@ mcp.registerTool(
       "Returns the new component set. Create components with figma_create (type COMPONENT) first.",
     inputSchema: {
       ids: z.array(z.string()).min(1).describe("COMPONENT node ids to combine"),
+      depth: z.number().int().min(0).max(3).optional().describe("Child levels in the result (default 0, the set only)"),
       name: z.string().optional().describe("Name of the component set, e.g. Button"),
       parentId: z.string().optional().describe("Where to put the set (default: the parent of the first component)"),
     },
@@ -388,6 +393,7 @@ mcp.registerTool(
       variant: z.record(z.string()).optional().describe("Variant property values to match in a component set"),
       parentId: z.string().optional().describe("Parent node id. Default: current page."),
       props: z.record(z.any()).optional().describe("Node props to apply to the instance"),
+      depth: z.number().int().min(0).max(4).optional().describe("Child levels in the result (default 1)"),
     },
   },
   wrap("create_instance")
@@ -407,6 +413,26 @@ mcp.registerTool(
     },
   },
   wrap("create_effect_style")
+);
+
+mcp.registerTool(
+  "figma_create_text_style",
+  {
+    description:
+      'Create a text style (e.g. "text/sm"), or update it if the name exists. `bind` ties fields to variables, e.g. ' +
+      '{fontSize:"core/font-size/sm"}. Apply it to a text node with figma_create / figma_update prop textStyle:"text/sm".',
+    inputSchema: {
+      name: z.string(),
+      fontFamily: z.string().describe('e.g. "Geist"'),
+      fontStyle: z.string().optional().describe('e.g. "Medium" (default Regular)'),
+      fontSize: z.number(),
+      lineHeight: z.number().optional().describe("px"),
+      letterSpacing: z.number().optional().describe("px"),
+      bind: z.record(z.string()).optional().describe('field -> "collection/name", e.g. {fontSize:"core/font-size/sm"}'),
+      description: z.string().optional(),
+    },
+  },
+  wrap("create_text_style")
 );
 
 mcp.registerTool(

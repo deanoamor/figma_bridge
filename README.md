@@ -168,6 +168,7 @@ Saat Claude membuat desain, node dimunculkan satu per satu dengan fade-in dari w
 | `figma_create_variable` | Buat atau perbarui satu variable di collection yang sudah ada (warna hex, alias, atau composed color: warna + opacity) |
 | `figma_create_instance` | Buat instance dari COMPONENT, atau dari variant tertentu di COMPONENT_SET (`variant:{size:"md"}`) |
 | `figma_create_effect_style` | Buat atau perbarui effect style (mis. `elevation/2`); pasang ke node dengan `effectStyle` |
+| `figma_create_text_style` | Buat atau perbarui text style (mis. `text/sm`), field-nya bisa diikat ke variable; pasang dengan prop `textStyle` |
 | `figma_list_styles` | Daftar effect, text dan paint style lokal (hanya baca) |
 | `figma_select` | Pilih node dan zoom ke sana |
 | `figma_export` | Ekspor node jadi gambar supaya Claude bisa melihat hasilnya |

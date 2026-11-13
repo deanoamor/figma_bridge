@@ -220,12 +220,48 @@ function varName(alias) {
   return alias && alias.id ? (varCache && varCache.names[alias.id]) || alias.id : alias;
 }
 
+// Like toEffect, but an effect may have `colorVariable: "collection/name"` to bind its color to a variable.
+async function toEffectsAsync(list) {
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var eff = toEffect(list[i]);
+    if (list[i].colorVariable) {
+      eff = figma.variables.setBoundVariableForEffect(eff, "color", await findVariable(list[i].colorVariable));
+    }
+    out.push(eff);
+  }
+  return out;
+}
+
 // Local effect style by name, e.g. "elevation/2".
 async function findEffectStyle(name) {
   var list = await figma.getLocalEffectStylesAsync();
   var hit = list.filter(function (s) { return s.name === name; })[0];
   if (!hit) {
     throw new Error('Effect style "' + name + '" not found. ' + (list.length ? "Available: " + list.map(function (s) { return s.name; }).join(", ") : "This file has no effect styles; create one with figma_create_effect_style."));
+  }
+  return hit;
+}
+
+// Bind the strokes and solid fills of every vector inside an imported SVG to one color variable ("collection/name").
+async function recolorSvg(node, ref) {
+  var variable = await findVariable(ref);
+  if (variable.resolvedType !== "COLOR") throw new Error('Variable "' + ref + '" is ' + variable.resolvedType + ", not COLOR");
+  var paint = function () { return figma.variables.setBoundVariableForPaint({ type: "SOLID", color: { r: 0, g: 0, b: 0 } }, "color", variable); };
+  var walk = function (n) {
+    if ("strokes" in n && Array.isArray(n.strokes) && n.strokes.length) n.strokes = [paint()];
+    if (n.type !== "FRAME" && "fills" in n && Array.isArray(n.fills) && n.fills.some(function (f) { return f.type === "SOLID"; })) n.fills = [paint()];
+    if ("children" in n) n.children.forEach(walk);
+  };
+  walk(node);
+}
+
+// Local text style by name, e.g. "text/sm".
+async function findTextStyle(name) {
+  var list = await figma.getLocalTextStylesAsync();
+  var hit = list.filter(function (s) { return s.name === name; })[0];
+  if (!hit) {
+    throw new Error('Text style "' + name + '" not found. ' + (list.length ? "Available: " + list.map(function (s) { return s.name; }).join(", ") : "This file has no text styles; create one with figma_create_text_style."));
   }
   return hit;
 }
@@ -365,7 +401,12 @@ async function applyProps(node, spec, isCreate) {
   ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"].forEach(function (k) {
     if (has(k) && k in node) node[k] = spec[k];
   });
-  if (has("effects") && "effects" in node) node.effects = (spec.effects || []).map(toEffect);
+  if (has("effects") && "effects" in node) node.effects = await toEffectsAsync(spec.effects || []);
+  if (has("description") && "description" in node) node.description = String(spec.description);
+  if (has("textStyle")) {
+    if (typeof node.setTextStyleIdAsync !== "function") throw new Error(type + " cannot use a text style");
+    await node.setTextStyleIdAsync((await findTextStyle(spec.textStyle)).id);
+  }
   if (has("effectStyle")) {
     if (typeof node.setEffectStyleIdAsync !== "function") throw new Error(type + " cannot use an effect style");
     await node.setEffectStyleIdAsync((await findEffectStyle(spec.effectStyle)).id);
@@ -440,6 +481,11 @@ async function createNodeTree(spec, parent, created, anim) {
   switch (type) {
     case "FRAME": node = figma.createFrame(); break;
     case "COMPONENT": node = figma.createComponent(); break;
+    case "SVG":
+      if (typeof spec.svg !== "string" || spec.svg.indexOf("<svg") < 0) throw new Error('type SVG needs an "svg" string');
+      try { node = figma.createNodeFromSvg(spec.svg.replace(/currentColor/g, "#000000")); }
+      catch (e) { throw new Error("Figma could not read this SVG: " + ((e && e.message) || e)); }
+      break;
     case "RECTANGLE": node = figma.createRectangle(); break;
     case "ELLIPSE": node = figma.createEllipse(); break;
     case "TEXT": node = figma.createText(); break;
@@ -465,6 +511,7 @@ async function createNodeTree(spec, parent, created, anim) {
   }
   created.push({ id: node.id, name: node.name, type: node.type });
 
+  if (type === "SVG" && spec.recolor) await recolorSvg(node, spec.recolor);
   if (Array.isArray(spec.children)) {
     if (!("appendChild" in node)) throw new Error(type + " cannot have children");
     for (var i = 0; i < spec.children.length; i++) {
@@ -715,7 +762,7 @@ var handlers = {
     if (p.name) set.name = p.name;
     set.clipsContent = false; // a component set clips by default, which cuts shadows and focus rings
     await loadVars(); // so the result shows variable names, not ids
-    return serialize(set, 1);
+    return serialize(set, p.depth === undefined ? 0 : p.depth); // children are rarely needed, keep the result small
   },
 
   // Copy a design to another theme: rebind_variables({id, from:"light", to:"dark"}) after figma_clone.
@@ -795,7 +842,7 @@ var handlers = {
     (await getParent(p.parentId)).appendChild(inst);
     await applyProps(inst, p.props || {}, true);
     await loadVars();
-    return serialize(inst, 2);
+    return serialize(inst, p.depth === undefined ? 1 : p.depth);
   },
 
   // Create an effect style, or update it if the name exists. effects use the same format as node `effects`.
@@ -805,9 +852,31 @@ var handlers = {
     var st = list.filter(function (s) { return s.name === p.name; })[0];
     var created = !st;
     if (!st) { st = figma.createEffectStyle(); st.name = p.name; }
-    st.effects = p.effects.map(toEffect);
+    st.effects = await toEffectsAsync(p.effects);
     if (p.description !== undefined) st.description = p.description;
     return { id: st.id, name: st.name, created: created, effects: st.effects.length };
+  },
+
+  // Create a text style, or update it if the name exists. `bind` ties fields to variables, e.g. {fontSize:"core/font-size/sm"}.
+  create_text_style: async function (p) {
+    if (!p.name || !p.fontFamily || !p.fontSize) throw new Error("name, fontFamily and fontSize are required");
+    var style = p.fontStyle || "Regular";
+    await ensureFont(p.fontFamily, style);
+    var list = await figma.getLocalTextStylesAsync();
+    var st = list.filter(function (s) { return s.name === p.name; })[0];
+    var created = !st;
+    if (!st) { st = figma.createTextStyle(); st.name = p.name; }
+    st.fontName = { family: p.fontFamily, style: style };
+    st.fontSize = p.fontSize;
+    if (p.lineHeight !== undefined) st.lineHeight = { unit: "PIXELS", value: p.lineHeight };
+    if (p.letterSpacing !== undefined) st.letterSpacing = { unit: "PIXELS", value: p.letterSpacing };
+    if (p.description !== undefined) st.description = p.description;
+    var fields = Object.keys(p.bind || {});
+    for (var i = 0; i < fields.length; i++) {
+      try { st.setBoundVariable(fields[i], await findVariable(p.bind[fields[i]])); }
+      catch (e) { throw new Error('Cannot bind "' + fields[i] + '" on a text style: ' + ((e && e.message) || e)); }
+    }
+    return { id: st.id, name: st.name, created: created };
   },
 
   // Read-only: local effect, text and paint styles.

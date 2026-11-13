@@ -29,6 +29,7 @@ class Node {
     return i;
   }
   async setEffectStyleIdAsync(id) { this.effectStyleId = id; }
+  async setTextStyleIdAsync(id) { this.textStyleId = id; }
   get opacity() { return this._o; }
   set opacity(v) { this._o = v; opacityLog.push({ id: this.id, v }); }
   constructor(type) {
@@ -36,6 +37,8 @@ class Node {
     this.x = 0; this.y = 0; this.width = 100; this.height = 100; this._o = 1; this.rotation = 0;
     this.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }]; this.strokes = []; this.strokeWeight = 1;
     this.effects = []; this.cornerRadius = 0; this.visible = true; this.boundVariables = {};
+    if (type === "COMPONENT" || type === "COMPONENT_SET") this.description = "";
+    if (type === "VECTOR") { this.fills = []; this.strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }]; }
     if (type === "FRAME" || type === "COMPONENT" || type === "COMPONENT_SET" || type === "INSTANCE") {
       this.children = []; this.layoutMode = "NONE"; this.itemSpacing = 0;
       this.paddingTop = this.paddingRight = this.paddingBottom = this.paddingLeft = 0;
@@ -68,6 +71,8 @@ const page = reg(new Node("PAGE")); page.name = "Page 1";
 const sent = [];
 const fontsLoaded = [];
 const effectStyles = [];
+const textStyles = [];
+const svgImported = [];
 const mkVar = (o) => ({ description: "", scopes: [], values: {}, setValueForMode(m, val) { this.values[m] = val; }, ...o });
 const varList = [
   mkVar({ id: "V:1", name: "radius/md", resolvedType: "FLOAT", value: 12, variableCollectionId: "VC:1" }),
@@ -91,7 +96,9 @@ const figma = {
     return { hash: "hash" + Buffer.from(bytes).toString("hex").slice(0, 12) };
   },
   getLocalEffectStylesAsync: async () => effectStyles,
-  getLocalTextStylesAsync: async () => [],
+  getLocalTextStylesAsync: async () => textStyles,
+  createTextStyle: () => { const s = { id: `T:${textStyles.length + 1}`, name: "", boundVars: {}, setBoundVariable(f, v) { if (!["fontSize", "lineHeight"].includes(f)) throw new Error("invalid field " + f); this.boundVars[f] = v.id; } }; textStyles.push(s); return s; },
+  createNodeFromSvg: (svg) => { svgImported.push(svg); const f = reg(new Node("FRAME")); f.name = "svg"; f.appendChild(reg(new Node("VECTOR"))); return f; },
   getLocalPaintStylesAsync: async () => [],
   createEffectStyle: () => { const s = { id: `S:${effectStyles.length + 1}`, name: "", effects: [], description: "" }; effectStyles.push(s); return s; },
   combineAsVariants(comps, parent) {
@@ -112,6 +119,7 @@ const figma = {
       return v;
     },
     createVariableAlias: (v) => ({ type: "VARIABLE_ALIAS", id: v.id }),
+    setBoundVariableForEffect: (effect, field, variable) => ({ ...effect, boundVariables: { [field]: { type: "VARIABLE_ALIAS", id: variable.id } } }),
     setBoundVariableForPaint: (paint, field, variable) => ({ ...paint, boundVariables: { [field]: { type: "VARIABLE_ALIAS", id: variable.id } } }),
   },
   showUI() {}, ui: { postMessage: (m) => sent.push(m), onmessage: null },
@@ -433,7 +441,7 @@ r = await call("combine_variants", { ids: [comp.id, badName.id] });
 assert.equal(r.ok, false); assert.match(r.error, /must look like/);
 r = await call("combine_variants", { ids: [card.id] });
 assert.equal(r.ok, false); assert.match(r.error, /not COMPONENT/);
-r = await call("combine_variants", { ids: [comp.id, comp2.id], name: "Button" });
+r = await call("combine_variants", { ids: [comp.id, comp2.id], name: "Button", depth: 1 });
 assert.equal(r.ok, true, r.error);
 assert.equal(r.result.type, "COMPONENT_SET"); assert.equal(r.result.name, "Button"); assert.equal(r.result.children.length, 2);
 assert.equal(r.result.children[0].fills[0].variable, "light/primary"); // names, not ids
@@ -583,5 +591,42 @@ assert.equal(r.ok, false); assert.match(r.error, /not found. Available: a, b/);
 r = await call("arrange_variants", { id: row.id });
 assert.equal(r.ok, false); assert.match(r.error, /not COMPONENT_SET/);
 console.log("ok: arrange_variants");
+
+// compact results: combine_variants returns the set only unless depth is given
+r = await call("combine_variants", { ids: [g1, g2], name: "Compact" });
+assert.equal(r.ok, true, r.error);
+assert.equal(r.result.children, undefined); assert.equal(r.result.childCount, 2);
+
+// SVG import (icons): currentColor becomes black, `recolor` binds strokes inside to a variable
+r = await call("create", { spec: { type: "COMPONENT", name: "name=check", children: [{ type: "SVG", name: "check", svg: '<svg width="20" height="20"><path stroke="currentColor"/></svg>', recolor: "light/primary" }] } });
+assert.equal(r.ok, true, r.error);
+assert.ok(svgImported[svgImported.length - 1].includes("#000000") && !svgImported[svgImported.length - 1].includes("currentColor"));
+const iconComp = r.result.created[0].id;
+r = await call("get_node", { id: iconComp, depth: 3 });
+assert.equal(r.result.children[0].children[0].strokes[0].variable, "light/primary");
+r = await call("create", { spec: { type: "SVG" } });
+assert.equal(r.ok, false); assert.match(r.error, /needs an "svg" string/);
+r = await call("create", { spec: { type: "SVG", svg: "<svg/>", recolor: "core/radius/md" } });
+assert.equal(r.ok, false); assert.match(r.error, /not COLOR/);
+console.log("ok: SVG import and recolor");
+
+// description on components, text styles, effect colors bound to variables
+r = await call("update", { id: iconComp, props: { description: "Level: atom" } });
+assert.equal(nodes.get(iconComp).description, "Level: atom");
+r = await call("create_text_style", { name: "text/sm", fontFamily: "Inter", fontStyle: "Regular", fontSize: 14, lineHeight: 20, bind: { fontSize: "core/space/2" } });
+assert.equal(r.ok, true, r.error); assert.equal(r.result.created, true);
+assert.equal(textStyles[0].boundVars.fontSize, "V:2");
+r = await call("create_text_style", { name: "text/sm", fontFamily: "Inter", fontSize: 15 });
+assert.equal(r.result.created, false); assert.equal(textStyles.length, 1); assert.equal(textStyles[0].fontSize, 15);
+r = await call("create_text_style", { name: "text/bad", fontFamily: "Inter", fontSize: 12, bind: { color: "core/space/2" } });
+assert.equal(r.ok, false); assert.match(r.error, /Cannot bind "color" on a text style/);
+r = await call("create", { spec: { type: "TEXT", characters: "x", textStyle: "text/sm" } });
+assert.equal(r.ok, true, r.error); assert.equal(nodes.get(r.result.created[0].id).textStyleId, "T:1");
+r = await call("create", { spec: { type: "TEXT", characters: "x", textStyle: "nope" } });
+assert.equal(r.ok, false); assert.match(r.error, /Available: text\/sm/);
+r = await call("create_effect_style", { name: "focus-ring", effects: [{ type: "DROP_SHADOW", x: 0, y: 0, blur: 0, spread: 4, colorVariable: "light/ring" }] });
+assert.equal(r.ok, true, r.error);
+assert.equal(effectStyles.find((e) => e.name === "focus-ring").effects[0].boundVariables.color.id, "V:5");
+console.log("ok: description, text styles, effect colors");
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

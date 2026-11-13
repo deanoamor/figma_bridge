@@ -328,12 +328,15 @@ mcp.registerTool(
       "In a node and all its children, re-point every variable of one collection to the variable with the same name in " +
       'another collection, e.g. from "light" to "dark". Variables of other collections (such as "core") are unchanged. ' +
       "Use it to make a dark copy of a design: figma_clone the node, then rebind the copy. Returns how many bindings changed " +
-      "and the target variables that do not exist (those bindings stay as they were).",
+      "and the target variables that do not exist (those bindings stay as they were). Instances need `swap` (see below).",
     inputSchema: {
       id: z.string().describe("Node id (usually a freshly cloned frame, component or component set)"),
       from: z.string().describe('Collection to move away from, e.g. "light"'),
       to: z.string().describe('Collection to move to, e.g. "dark"'),
       name: z.string().optional().describe("Optional new name for the node"),
+      swap: z.record(z.string()).optional().describe(
+        'Instances: {"<component set id>":"<other component set id>"} switches each instance of a variant to the variant with the same properties in the other set, e.g. the light Button set to the dark one. Nothing inside an instance is rebound; instances without a swap are listed in `unswapped`.'
+      ),
     },
   },
   wrap("rebind_variables")

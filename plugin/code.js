@@ -254,7 +254,27 @@ async function toVariableValue(type, value) {
 
 // Re-point every variable of collection `from` in a subtree to the same-named variable of collection `to`
 // (e.g. light -> dark). Variables of other collections (e.g. core) are left alone.
-async function rebindNode(node, from, to, stats, c) {
+function sameProps(a, b) {
+  var ka = Object.keys(a || {}).sort(), kb = Object.keys(b || {}).sort();
+  return ka.length === kb.length && ka.every(function (k, i) { return k === kb[i] && String(a[k]) === String(b[k]); });
+}
+
+// `swap` maps a COMPONENT_SET id to another one. An instance of a variant of the first set is switched to the variant
+// with the same properties in the second (e.g. Button / light -> Button / dark). Nothing inside an instance is
+// rebound (that would only create overrides); instances without a swap are reported.
+async function rebindNode(node, from, to, stats, c, swap) {
+  if (node.type === "INSTANCE") {
+    var main = await node.getMainComponentAsync();
+    var set = main && main.parent && main.parent.type === "COMPONENT_SET" ? main.parent : null;
+    var targetId = set && swap && swap[set.id];
+    if (!targetId) { stats.unswapped[node.name] = true; return; }
+    var target = await getNode(targetId);
+    var match = target.children.filter(function (v) { return v.type === "COMPONENT" && sameProps(v.variantProperties, main.variantProperties); })[0];
+    if (!match) { stats.missing["swap:" + target.name + " " + JSON.stringify(main.variantProperties)] = true; return; }
+    node.swapComponent(match);
+    stats.swapped++;
+    return;
+  }
   function target(alias) {
     var key = alias && alias.id && c.names[alias.id];
     if (!key || key.indexOf(from + "/") !== 0) return null;
@@ -283,7 +303,7 @@ async function rebindNode(node, from, to, stats, c) {
     if (v) { node.setBoundVariable(field, v); stats.rebound++; }
   });
   if ("children" in node) {
-    for (var i = 0; i < node.children.length; i++) await rebindNode(node.children[i], from, to, stats, c);
+    for (var i = 0; i < node.children.length; i++) await rebindNode(node.children[i], from, to, stats, c, swap);
   }
 }
 
@@ -705,10 +725,13 @@ var handlers = {
       if (c.collections.indexOf(n) < 0) throw new Error('Collection "' + n + '" not found. Available: ' + c.collections.join(", "));
     });
     var node = await getNode(p.id);
-    var stats = { rebound: 0, missing: {} };
-    await rebindNode(node, p.from, p.to, stats, c);
+    var stats = { rebound: 0, swapped: 0, missing: {}, unswapped: {} };
+    await rebindNode(node, p.from, p.to, stats, c, p.swap);
     if (p.name) node.name = p.name;
-    return { id: node.id, name: node.name, rebound: stats.rebound, missing: Object.keys(stats.missing) };
+    return {
+      id: node.id, name: node.name, rebound: stats.rebound, swapped: stats.swapped,
+      missing: Object.keys(stats.missing), unswapped: Object.keys(stats.unswapped),
+    };
   },
 
   // Read-only: local variable collections and their variables (used to bind tokens to nodes by name).

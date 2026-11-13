@@ -14,7 +14,9 @@ class Node {
   }
   createInstance() {
     const i = new Node("INSTANCE"); nodes.set(i.id, i);
-    i._vp = { ...this.variantProperties }; i.fills = []; page.appendChild(i);
+    i._vp = { ...this.variantProperties }; i.fills = []; i._main = this; page.appendChild(i);
+    i.getMainComponentAsync = async function () { return this._main; };
+    i.swapComponent = function (c) { this._main = c; this._vp = { ...c.variantProperties }; };
     i.setProperties = function (props) { Object.assign(this._vp, props); };
     return i;
   }
@@ -530,5 +532,27 @@ r = await call("list_styles", {});
 assert.equal(JSON.stringify(r.result.effect), JSON.stringify([{ id: "S:1", name: "elevation/2", effects: 1 }]));
 assert.equal(r.result.text.length, 0);
 console.log("ok: effect styles");
+
+// rebind swaps instances to the matching variant of another set (light Button -> dark Button)
+r = await call("create", { spec: { type: "COMPONENT", name: "variant=default, size=md" } });
+const dA = r.result.created[0];
+r = await call("create", { spec: { type: "COMPONENT", name: "variant=outline, size=md" } });
+const dB = r.result.created[0];
+r = await call("combine_variants", { ids: [dA.id, dB.id], name: "Btn dark" });
+const darkSet = r.result;
+r = await call("create", { spec: { type: "FRAME", name: "dlg" } });
+const dlg = r.result.created[0];
+r = await call("create_instance", { id: btnSet.id, variant: { variant: "outline" }, parentId: dlg.id, props: { name: "Cancel" } });
+const cancelInst = r.result.id;
+r = await call("create_instance", { id: btnSet.id, variant: { variant: "default" }, parentId: dlg.id, props: { name: "Other" } });
+r = await call("rebind_variables", { id: dlg.id, from: "light", to: "dark", swap: { [btnSet.id]: darkSet.id } });
+assert.equal(r.ok, true, r.error);
+assert.equal(r.result.swapped, 2); assert.equal(JSON.stringify(r.result.unswapped), "[]");
+assert.equal(nodes.get(cancelInst)._main.parent.id, darkSet.id);
+assert.equal(nodes.get(cancelInst)._main.variantProperties.variant, "outline"); // same variant, other set
+assert.equal(nodes.get(cancelInst).name, "Cancel"); // instance name kept
+r = await call("rebind_variables", { id: dlg.id, from: "light", to: "dark" });
+assert.equal(JSON.stringify(r.result.unswapped.sort()), JSON.stringify(["Cancel", "Other"])); // no swap given: reported, not rebound
+console.log("ok: rebind swaps instances");
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

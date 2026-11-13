@@ -45,6 +45,14 @@ const reg = (n) => (nodes.set(n.id, n), n);
 const page = reg(new Node("PAGE")); page.name = "Page 1";
 const sent = [];
 const fontsLoaded = [];
+const mkVar = (o) => ({ description: "", scopes: [], values: {}, setValueForMode(m, val) { this.values[m] = val; }, ...o });
+const varList = [
+  mkVar({ id: "V:1", name: "radius/md", resolvedType: "FLOAT", value: 12, variableCollectionId: "VC:1" }),
+  mkVar({ id: "V:2", name: "space/2", resolvedType: "FLOAT", value: 8, variableCollectionId: "VC:1" }),
+  mkVar({ id: "V:3", name: "primary", resolvedType: "COLOR", description: "Brand color.", variableCollectionId: "VC:2" }),
+  mkVar({ id: "V:4", name: "primary", resolvedType: "COLOR", variableCollectionId: "VC:3" }),
+  mkVar({ id: "V:5", name: "ring", resolvedType: "COLOR", variableCollectionId: "VC:2" }), // no dark/ring on purpose
+];
 const figma = {
   mixed, currentPage: page, root: { name: "Test file", children: [page] },
   viewport: { scrollAndZoomIntoView() {} },
@@ -65,14 +73,18 @@ const figma = {
     return set;
   },
   variables: {
-    getLocalVariableCollectionsAsync: async () => [{ id: "VC:1", name: "core", modes: [{ name: "Mode 1" }] }, { id: "VC:2", name: "light", modes: [{ name: "Light" }] }, { id: "VC:3", name: "dark", modes: [{ name: "Dark" }] }],
-    getLocalVariablesAsync: async () => [
-      { id: "V:1", name: "radius/md", resolvedType: "FLOAT", value: 12, variableCollectionId: "VC:1" },
-      { id: "V:2", name: "space/2", resolvedType: "FLOAT", value: 8, variableCollectionId: "VC:1" },
-      { id: "V:3", name: "primary", resolvedType: "COLOR", description: "Brand color.", variableCollectionId: "VC:2" },
-      { id: "V:4", name: "primary", resolvedType: "COLOR", variableCollectionId: "VC:3" },
-      { id: "V:5", name: "ring", resolvedType: "COLOR", variableCollectionId: "VC:2" }, // no dark/ring on purpose
+    getLocalVariableCollectionsAsync: async () => [
+      { id: "VC:1", name: "core", modes: [{ modeId: "m:1", name: "Mode 1" }] },
+      { id: "VC:2", name: "light", modes: [{ modeId: "m:2", name: "Light" }] },
+      { id: "VC:3", name: "dark", modes: [{ modeId: "m:3", name: "Dark" }] },
     ],
+    getLocalVariablesAsync: async () => varList,
+    createVariable: (name, col, type) => {
+      const v = mkVar({ id: `V:${varList.length + 1}`, name, resolvedType: type, variableCollectionId: col.id });
+      varList.push(v);
+      return v;
+    },
+    createVariableAlias: (v) => ({ type: "VARIABLE_ALIAS", id: v.id }),
     setBoundVariableForPaint: (paint, field, variable) => ({ ...paint, boundVariables: { [field]: { type: "VARIABLE_ALIAS", id: variable.id } } }),
   },
   showUI() {}, ui: { postMessage: (m) => sent.push(m), onmessage: null },
@@ -434,5 +446,31 @@ assert.equal(JSON.stringify(lightCol.variables), JSON.stringify([
   { id: "V:5", name: "ring", type: "COLOR", hasDescription: false },
 ]));
 console.log("ok: list_variables");
+
+// opacity on a variable paint is refused (Figma cannot keep both)
+r = await call("create", { spec: { type: "RECTANGLE", fills: [{ type: "SOLID", variable: "light/primary", opacity: 0.14 }] } });
+assert.equal(r.ok, false); assert.match(r.error, /already has alpha/);
+console.log("ok: opacity on variable paint is refused");
+
+// create_variable: composed color, update in place, hex alpha, errors
+r = await call("create_variable", { collection: "light", name: "ring-subtle", type: "COLOR", value: { color: "light/ring", opacity: 14 }, description: "tint", scopes: ["ALL_FILLS"] });
+assert.equal(r.ok, true, r.error);
+assert.equal(r.result.created, true); assert.equal(r.result.name, "light/ring-subtle");
+const subtle = varList.find((v) => v.name === "ring-subtle");
+assert.deepEqual(JSON.parse(JSON.stringify(subtle.values["m:2"])), { color: { type: "VARIABLE_ALIAS", id: "V:5" }, opacity: 14 });
+assert.equal(subtle.description, "tint"); assert.deepEqual(Array.from(subtle.scopes), ["ALL_FILLS"]);
+r = await call("create_variable", { collection: "light", name: "ring-subtle", type: "COLOR", value: { color: "light/ring", opacity: 20 } });
+assert.equal(r.result.created, false); assert.equal(subtle.values["m:2"].opacity, 20); // updated, not duplicated
+assert.equal(varList.filter((v) => v.name === "ring-subtle").length, 1);
+r = await call("create_variable", { collection: "dark", name: "flat", type: "COLOR", value: "#FF000080" });
+const flat = varList.find((v) => v.name === "flat").values["m:3"];
+assert.equal(flat.r, 1); assert.ok(Math.abs(flat.a - 128 / 255) < 1e-9);
+r = await call("create_variable", { collection: "nope", name: "x", type: "COLOR", value: "#000000" });
+assert.equal(r.ok, false); assert.match(r.error, /Collection "nope" not found/);
+r = await call("create_variable", { collection: "light", name: "bad", type: "COLOR", value: { color: "light/ring", opacity: 140 } });
+assert.equal(r.ok, false); assert.match(r.error, /0 to 100/);
+r = await call("create_variable", { collection: "light", name: "primary", type: "FLOAT", value: 1 });
+assert.equal(r.ok, false); assert.match(r.error, /exists as COLOR/);
+console.log("ok: create_variable");
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

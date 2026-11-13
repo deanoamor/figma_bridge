@@ -17,7 +17,7 @@ await client.connect(transport);
 const tools = (await client.listTools()).tools.map((t) => t.name).sort();
 console.log("tools:", tools.join(", "));
 assert.deepEqual(tools, [
-  "figma_clone", "figma_combine_variants", "figma_create", "figma_delete", "figma_export", "figma_get_node",
+  "figma_clone", "figma_combine_variants", "figma_create", "figma_create_variable", "figma_delete", "figma_export", "figma_get_node",
   "figma_get_selection", "figma_get_slots", "figma_list_variables", "figma_rebind_variables", "figma_select", "figma_set_slot", "figma_status", "figma_update",
 ]);
 
@@ -74,6 +74,10 @@ console.log("ok: rebind_variables");
 r = await client.callTool({ name: "figma_list_variables", arguments: {} });
 assert.equal(JSON.parse(r.content[0].text).echo, "list_variables");
 console.log("ok: list_variables");
+
+r = await client.callTool({ name: "figma_create_variable", arguments: { collection: "light", name: "success-subtle", type: "COLOR", value: { color: "light/success", opacity: 14 } } });
+assert.deepEqual(JSON.parse(r.content[0].text).params.value, { color: "light/success", opacity: 14 });
+console.log("ok: create_variable");
 
 r = await client.callTool({ name: "figma_export", arguments: { id: "1:3", scale: 2 } });
 assert.equal(r.content[0].type, "image");

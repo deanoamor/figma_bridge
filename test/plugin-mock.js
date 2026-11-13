@@ -7,6 +7,14 @@ let idc = 0;
 const mixed = Symbol("mixed");
 const opacityLog = []; // every opacity write: { id, v }
 class Node {
+  get variantGroupProperties() {
+    if (this.type !== "COMPONENT_SET") return null;
+    const g = {};
+    this.children.forEach((c) => Object.entries(c.variantProperties || {}).forEach(([k, v]) => {
+      g[k] = g[k] || { values: [] }; if (!g[k].values.includes(v)) g[k].values.push(v);
+    }));
+    return g;
+  }
   get variantProperties() {
     if (this._vp) return this._vp;
     if (this.type !== "COMPONENT") return null;
@@ -554,5 +562,26 @@ assert.equal(nodes.get(cancelInst).name, "Cancel"); // instance name kept
 r = await call("rebind_variables", { id: dlg.id, from: "light", to: "dark" });
 assert.equal(JSON.stringify(r.result.unswapped.sort()), JSON.stringify(["Cancel", "Other"])); // no swap given: reported, not rebound
 console.log("ok: rebind swaps instances");
+
+// combine_variants turns off clipping; arrange_variants lays variants out in a grid
+assert.equal(nodes.get(btnSet.id).clipsContent, false);
+const mkComp = async (name, w, h) => (await call("create", { spec: { type: "COMPONENT", name, width: w, height: h } })).result.created[0].id;
+const g1 = await mkComp("a=x, b=s", 50, 20), g2 = await mkComp("a=x, b=l", 90, 30), g3 = await mkComp("a=y, b=s", 60, 20), g4 = await mkComp("a=y, b=l", 70, 40);
+r = await call("combine_variants", { ids: [g1, g2, g3, g4], name: "Grid" });
+const gridSet = r.result.id;
+r = await call("arrange_variants", { id: gridSet, rows: ["a"], columns: ["b"], gapX: 10, gapY: 5, padding: 2 });
+assert.equal(r.ok, true, r.error);
+assert.equal(r.result.rows, 2); assert.equal(r.result.columns, 2);
+// column widths: s = max(50, 60) = 60, l = max(90, 70) = 90; row heights: x = max(20, 30) = 30, y = max(20, 40) = 40
+assert.deepEqual([nodes.get(g1).x, nodes.get(g1).y], [2, 2]);
+assert.deepEqual([nodes.get(g2).x, nodes.get(g2).y], [72, 2]);   // 2 + 60 + 10
+assert.deepEqual([nodes.get(g3).x, nodes.get(g3).y], [2, 37]);   // 2 + 30 + 5
+assert.deepEqual([nodes.get(g4).x, nodes.get(g4).y], [72, 37]);
+assert.equal(r.result.width, 2 + 60 + 10 + 90 + 2); assert.equal(r.result.height, 2 + 30 + 5 + 40 + 2);
+r = await call("arrange_variants", { id: gridSet, rows: ["nope"] });
+assert.equal(r.ok, false); assert.match(r.error, /not found. Available: a, b/);
+r = await call("arrange_variants", { id: row.id });
+assert.equal(r.ok, false); assert.match(r.error, /not COMPONENT_SET/);
+console.log("ok: arrange_variants");
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

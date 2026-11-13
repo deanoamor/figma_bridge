@@ -163,6 +163,7 @@ Saat Claude membuat desain, node dimunculkan satu per satu dengan fade-in dari w
 | `figma_delete` | Hapus node (bisa di-undo di Figma) |
 | `figma_clone` | Duplikat node |
 | `figma_combine_variants` | Gabungkan node COMPONENT jadi satu component set (variant). Nama komponen harus `property=value, property=value` |
+| `figma_arrange_variants` | Susun variant dalam component set menjadi grid rapi (`rows` dan `columns` berupa nama property variant) |
 | `figma_rebind_variables` | Di satu node dan anak-anaknya, pindahkan variable dari satu collection ke variable bernama sama di collection lain (mis. `light` → `dark`) |
 | `figma_create_variable` | Buat atau perbarui satu variable di collection yang sudah ada (warna hex, alias, atau composed color: warna + opacity) |
 | `figma_create_instance` | Buat instance dari COMPONENT, atau dari variant tertentu di COMPONENT_SET (`variant:{size:"md"}`) |

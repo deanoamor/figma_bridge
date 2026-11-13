@@ -713,6 +713,7 @@ var handlers = {
     var parent = p.parentId ? await getParent(p.parentId) : comps[0].parent;
     var set = figma.combineAsVariants(comps, parent);
     if (p.name) set.name = p.name;
+    set.clipsContent = false; // a component set clips by default, which cuts shadows and focus rings
     await loadVars(); // so the result shows variable names, not ids
     return serialize(set, 1);
   },
@@ -820,6 +821,39 @@ var handlers = {
       text: tx.map(brief),
       paint: pt.map(brief),
     };
+  },
+
+  // Lay the variants of a component set out in a tidy grid. `rows` / `columns` are variant property names; a cell
+  // is placed by the position of its values in the property's value order. Rows and columns are only created for
+  // combinations that exist, and sized to their largest variant.
+  arrange_variants: async function (p) {
+    var set = await getNode(p.id);
+    if (set.type !== "COMPONENT_SET") throw new Error("Node " + p.id + " is " + set.type + ", not COMPONENT_SET");
+    var groups = set.variantGroupProperties || {};
+    var rowProps = p.rows || [], colProps = p.columns || [];
+    rowProps.concat(colProps).forEach(function (n) {
+      if (!groups[n]) throw new Error('Variant property "' + n + '" not found. Available: ' + Object.keys(groups).join(", "));
+    });
+    var gapX = p.gapX === undefined ? 24 : p.gapX, gapY = p.gapY === undefined ? 24 : p.gapY, pad = p.padding || 0;
+    var kids = set.children.filter(function (c) { return c.type === "COMPONENT"; });
+    var key = function (c, props) {
+      return props.map(function (n) { return String(1000 + groups[n].values.indexOf(String(c.variantProperties[n]))); }).join("|");
+    };
+    var uniq = function (arr) { return arr.filter(function (v, i) { return arr.indexOf(v) === i; }).sort(); };
+    var rowKeys = uniq(kids.map(function (c) { return key(c, rowProps); }));
+    var colKeys = uniq(kids.map(function (c) { return key(c, colProps); }));
+    var colW = {}, rowH = {};
+    kids.forEach(function (c) {
+      var rk = key(c, rowProps), ck = key(c, colProps);
+      colW[ck] = Math.max(colW[ck] || 0, c.width);
+      rowH[rk] = Math.max(rowH[rk] || 0, c.height);
+    });
+    var xs = {}, ys = {}, x = pad, y = pad;
+    colKeys.forEach(function (k) { xs[k] = x; x += colW[k] + gapX; });
+    rowKeys.forEach(function (k) { ys[k] = y; y += rowH[k] + gapY; });
+    kids.forEach(function (c) { c.x = xs[key(c, colProps)]; c.y = ys[key(c, rowProps)]; });
+    set.resize(Math.max(x - gapX + pad, 1), Math.max(y - gapY + pad, 1));
+    return { id: set.id, name: set.name, rows: rowKeys.length, columns: colKeys.length, width: round(set.width), height: round(set.height) };
   },
 
   get_selection: async function (p) {
@@ -945,7 +979,7 @@ figma.ui.onmessage = async function (msg) {
   if (!msg || msg.id === undefined) return;
   try {
     varCache = null;
-    if (msg.command === "get_node" || msg.command === "get_selection" || msg.command === "get_slots") await loadVars();
+    await loadVars(); // so every response shows variable names, not ids
     var handler = handlers[msg.command];
     if (!handler) throw new Error("Unknown command: " + msg.command);
     var result = await handler(msg.params || {});

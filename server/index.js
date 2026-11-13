@@ -419,6 +419,24 @@ mcp.registerTool(
 );
 
 mcp.registerTool(
+  "figma_arrange_variants",
+  {
+    description:
+      "Lay out the variants of a component set in a tidy grid and resize the set to fit. `rows` and `columns` are variant " +
+      'property names (e.g. rows ["variant"], columns ["size","disabled"]); a variant goes in the cell given by its values, ' +
+      "ordered like the property's values. Only combinations that exist get a row or column, each sized to its largest " +
+      "variant. gapX and gapY default to 24, padding to 0.",
+    inputSchema: {
+      id: z.string().describe("COMPONENT_SET node id"),
+      rows: z.array(z.string()).optional().describe("Variant properties that define the rows (default: one row)"),
+      columns: z.array(z.string()).optional().describe("Variant properties that define the columns (default: one column)"),
+      gapX: z.number().optional(), gapY: z.number().optional(), padding: z.number().optional(),
+    },
+  },
+  wrap("arrange_variants")
+);
+
+mcp.registerTool(
   "figma_get_slots",
   {
     description:

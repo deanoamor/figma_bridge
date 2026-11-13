@@ -65,11 +65,13 @@ const figma = {
     return set;
   },
   variables: {
-    getLocalVariableCollectionsAsync: async () => [{ id: "VC:1", name: "core" }, { id: "VC:2", name: "light" }],
+    getLocalVariableCollectionsAsync: async () => [{ id: "VC:1", name: "core" }, { id: "VC:2", name: "light" }, { id: "VC:3", name: "dark" }],
     getLocalVariablesAsync: async () => [
       { id: "V:1", name: "radius/md", resolvedType: "FLOAT", value: 12, variableCollectionId: "VC:1" },
       { id: "V:2", name: "space/2", resolvedType: "FLOAT", value: 8, variableCollectionId: "VC:1" },
       { id: "V:3", name: "primary", resolvedType: "COLOR", variableCollectionId: "VC:2" },
+      { id: "V:4", name: "primary", resolvedType: "COLOR", variableCollectionId: "VC:3" },
+      { id: "V:5", name: "ring", resolvedType: "COLOR", variableCollectionId: "VC:2" }, // no dark/ring on purpose
     ],
     setBoundVariableForPaint: (paint, field, variable) => ({ ...paint, boundVariables: { [field]: { type: "VARIABLE_ALIAS", id: variable.id } } }),
   },
@@ -397,5 +399,26 @@ assert.equal(r.ok, true, r.error);
 assert.equal(r.result.type, "COMPONENT_SET"); assert.equal(r.result.name, "Button"); assert.equal(r.result.children.length, 2);
 assert.equal(r.result.children[0].fills[0].variable, "light/primary"); // names, not ids
 console.log("ok: combine_variants");
+
+// rebind light -> dark on a copy; core variables stay
+r = await call("create", { spec: {
+  type: "COMPONENT", name: "variant=default", cornerRadius: 1, fills: "var:light/primary", strokes: "var:light/ring",
+  bind: { cornerRadius: "core/radius/md" },
+  children: [{ type: "TEXT", characters: "x", textColor: "var:light/primary" }],
+} });
+const themed = r.result.created[0];
+r = await call("rebind_variables", { id: themed.id, from: "light", to: "dark", name: "variant=default (dark)" });
+assert.equal(r.ok, true, r.error);
+assert.equal(r.result.rebound, 2); // fill + the text fill
+assert.deepEqual(Array.from(r.result.missing), ["dark/ring"]);
+assert.equal(r.result.name, "variant=default (dark)");
+r = await call("get_node", { id: themed.id, depth: 1 });
+assert.equal(r.result.fills[0].variable, "dark/primary");
+assert.equal(r.result.strokes[0].variable, "light/ring"); // missing target: unchanged
+assert.equal(r.result.children[0].fills[0].variable, "dark/primary");
+assert.equal(r.result.bound.cornerRadius, "core/radius/md");
+r = await call("rebind_variables", { id: themed.id, from: "light", to: "nope" });
+assert.equal(r.ok, false); assert.match(r.error, /Collection "nope" not found/);
+console.log("ok: rebind_variables");
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

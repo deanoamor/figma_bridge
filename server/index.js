@@ -267,7 +267,7 @@ Node spec (JSON object). Common fields:
 - variables (design tokens): refer to a local Figma variable as "collection/name", e.g. "light/primary", "core/radius/md" (the variable name keeps its own slashes).
   Colors: fills/strokes/textColor accept "var:light/primary" or [{type:"SOLID", variable:"light/primary", opacity?}].
   Numbers and other fields: bind:{cornerRadius:"core/radius/md", strokeWeight:"core/line/hairline", itemSpacing:"core/space/2", paddingLeft:"core/space/4", height:"core/control/md"}; use null to unbind.
-  Works in figma_create and figma_update. Unknown names fail with similar suggestions; figma_get_node shows bindings as "variable" on paints and "bound" on the node.
+  Works in figma_create and figma_update (see figma_rebind_variables to switch a copy to another collection). Unknown names fail with similar suggestions; figma_get_node shows bindings as "variable" on paints and "bound" on the node.
 - strokes: same format as fills (solid/gradient only); strokeWeight; strokeAlign: INSIDE|OUTSIDE|CENTER
 - cornerRadius (number) or topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius
 - effects: [{type:"DROP_SHADOW"|"INNER_SHADOW",color:"#hex",opacity?,x,y,blur,spread?}] or [{type:"LAYER_BLUR",blur}]
@@ -317,6 +317,24 @@ mcp.registerTool(
     },
   },
   wrap("combine_variants")
+);
+
+mcp.registerTool(
+  "figma_rebind_variables",
+  {
+    description:
+      "In a node and all its children, re-point every variable of one collection to the variable with the same name in " +
+      'another collection, e.g. from "light" to "dark". Variables of other collections (such as "core") are unchanged. ' +
+      "Use it to make a dark copy of a design: figma_clone the node, then rebind the copy. Returns how many bindings changed " +
+      "and the target variables that do not exist (those bindings stay as they were).",
+    inputSchema: {
+      id: z.string().describe("Node id (usually a freshly cloned frame, component or component set)"),
+      from: z.string().describe('Collection to move away from, e.g. "light"'),
+      to: z.string().describe('Collection to move to, e.g. "dark"'),
+      name: z.string().optional().describe("Optional new name for the node"),
+    },
+  },
+  wrap("rebind_variables")
 );
 
 mcp.registerTool(

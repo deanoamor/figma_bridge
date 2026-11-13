@@ -177,19 +177,19 @@ async function getNode(id) {
 var varCache = null; // reset for every command; { byKey: { "collection/name": Variable }, names: { id: "collection/name" } }
 async function loadVars() {
   if (varCache) return varCache;
-  var byKey = {}, names = {};
+  var byKey = {}, names = {}, collections = [];
   if (figma.variables) {
     var cols = await figma.variables.getLocalVariableCollectionsAsync();
     var vars = await figma.variables.getLocalVariablesAsync();
     var colName = {};
-    cols.forEach(function (c) { colName[c.id] = c.name; });
+    cols.forEach(function (c) { colName[c.id] = c.name; collections.push(c.name); });
     vars.forEach(function (v) {
       var key = (colName[v.variableCollectionId] || "?") + "/" + v.name;
       byKey[key] = v;
       names[v.id] = key;
     });
   }
-  varCache = { byKey: byKey, names: names };
+  varCache = { byKey: byKey, names: names, collections: collections };
   return varCache;
 }
 
@@ -215,6 +215,41 @@ async function toVariablePaint(p) {
 
 function varName(alias) {
   return alias && alias.id ? (varCache && varCache.names[alias.id]) || alias.id : alias;
+}
+
+// Re-point every variable of collection `from` in a subtree to the same-named variable of collection `to`
+// (e.g. light -> dark). Variables of other collections (e.g. core) are left alone.
+async function rebindNode(node, from, to, stats, c) {
+  function target(alias) {
+    var key = alias && alias.id && c.names[alias.id];
+    if (!key || key.indexOf(from + "/") !== 0) return null;
+    var tkey = to + "/" + key.slice(from.length + 1);
+    if (!c.byKey[tkey]) { stats.missing[tkey] = true; return null; }
+    return c.byKey[tkey];
+  }
+  ["fills", "strokes"].forEach(function (k) {
+    if (!(k in node) || !Array.isArray(node[k])) return;
+    var changed = false;
+    var next = node[k].map(function (p) {
+      var a = p.type === "SOLID" && p.boundVariables && p.boundVariables.color;
+      var v = a ? target(a) : null;
+      if (!v) return p;
+      changed = true;
+      stats.rebound++;
+      return figma.variables.setBoundVariableForPaint(p, "color", v);
+    });
+    if (changed) node[k] = next;
+  });
+  var bv = node.boundVariables || {};
+  Object.keys(bv).forEach(function (field) {
+    var a = bv[field];
+    if (field === "fills" || field === "strokes" || !a || Array.isArray(a) || !a.id) return;
+    var v = target(a);
+    if (v) { node.setBoundVariable(field, v); stats.rebound++; }
+  });
+  if ("children" in node) {
+    for (var i = 0; i < node.children.length; i++) await rebindNode(node.children[i], from, to, stats, c);
+  }
 }
 
 // ------------------------------------------------------------- apply props
@@ -616,6 +651,20 @@ var handlers = {
     if (p.name) set.name = p.name;
     await loadVars(); // so the result shows variable names, not ids
     return serialize(set, 1);
+  },
+
+  // Copy a design to another theme: rebind_variables({id, from:"light", to:"dark"}) after figma_clone.
+  rebind_variables: async function (p) {
+    if (!p.id || !p.from || !p.to) throw new Error("id, from and to are required");
+    var c = await loadVars();
+    [p.from, p.to].forEach(function (n) {
+      if (c.collections.indexOf(n) < 0) throw new Error('Collection "' + n + '" not found. Available: ' + c.collections.join(", "));
+    });
+    var node = await getNode(p.id);
+    var stats = { rebound: 0, missing: {} };
+    await rebindNode(node, p.from, p.to, stats, c);
+    if (p.name) node.name = p.name;
+    return { id: node.id, name: node.name, rebound: stats.rebound, missing: Object.keys(stats.missing) };
   },
 
   get_selection: async function (p) {

@@ -18,7 +18,7 @@ const tools = (await client.listTools()).tools.map((t) => t.name).sort();
 console.log("tools:", tools.join(", "));
 assert.deepEqual(tools, [
   "figma_clone", "figma_combine_variants", "figma_create", "figma_delete", "figma_export", "figma_get_node",
-  "figma_get_selection", "figma_get_slots", "figma_select", "figma_set_slot", "figma_status", "figma_update",
+  "figma_get_selection", "figma_get_slots", "figma_rebind_variables", "figma_select", "figma_set_slot", "figma_status", "figma_update",
 ]);
 
 // 1) no plugin connected -> clear error
@@ -66,6 +66,10 @@ r = await client.callTool({ name: "figma_combine_variants", arguments: { ids: ["
 assert.equal(JSON.parse(r.content[0].text).echo, "combine_variants");
 assert.deepEqual(JSON.parse(r.content[0].text).params.ids, ["1:3", "1:4"]);
 console.log("ok: combine_variants");
+
+r = await client.callTool({ name: "figma_rebind_variables", arguments: { id: "1:3", from: "light", to: "dark", name: "Button / dark" } });
+assert.deepEqual(JSON.parse(r.content[0].text).params, { id: "1:3", from: "light", to: "dark", name: "Button / dark" });
+console.log("ok: rebind_variables");
 
 r = await client.callTool({ name: "figma_export", arguments: { id: "1:3", scale: 2 } });
 assert.equal(r.content[0].type, "image");

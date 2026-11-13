@@ -54,6 +54,13 @@ const figma = {
     if (!bytes.length || bytes[0] !== 0x89) throw new Error("unsupported image");
     return { hash: "hash" + Buffer.from(bytes).toString("hex").slice(0, 12) };
   },
+  variables: {
+    getLocalVariableCollectionsAsync: async () => [{ id: "VC:1", name: "light", modes: [{ name: "Mode 1" }] }],
+    getLocalVariablesAsync: async () => [
+      { id: "V:1", name: "background", resolvedType: "COLOR", description: "Page background.", variableCollectionId: "VC:1" },
+      { id: "V:2", name: "primary", resolvedType: "COLOR", description: "", variableCollectionId: "VC:2" },
+    ],
+  },
   showUI() {}, ui: { postMessage: (m) => sent.push(m), onmessage: null },
 };
 // Fake auto-layout behaviour: a child's layoutSizing* only exists inside an auto-layout parent
@@ -333,5 +340,12 @@ assert.equal(r.ok, false); assert.match(r.error, /could not read this image/);
 r = await call("create", { spec: { type: "RECTANGLE", fills: [{ type: "IMAGE", base64: PNG_B64, scaleMode: "STRETCH" }] } });
 assert.equal(r.ok, false); assert.match(r.error, /scaleMode must be/);
 console.log("ok: image errors");
+
+// list_variables groups variables by collection
+r = await call("list_variables", {});
+assert.equal(r.result.length, 1); assert.equal(r.result[0].name, "light");
+assert.equal(r.result[0].variableCount, 1); // the variable of another collection is not counted
+assert.equal(JSON.stringify(r.result[0].variables), JSON.stringify([{ id: "V:1", name: "background", type: "COLOR", hasDescription: true }])); // JSON: vm objects are cross-realm
+console.log("ok: list_variables");
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

@@ -123,7 +123,9 @@ async function toPaintsAsync(v) {
   var out = [];
   for (var i = 0; i < v.length; i++) {
     var p = v[i];
+    if (typeof p === "string" && p.indexOf("var:") === 0) p = { type: "SOLID", variable: p.slice(4) };
     if (p && typeof p === "object" && p.type === "IMAGE") out.push(await toImagePaint(p));
+    else if (p && typeof p === "object" && p.variable) out.push(await toVariablePaint(p));
     else out.push(toPaint(p));
   }
   return out;
@@ -171,6 +173,85 @@ async function getNode(id) {
   return n;
 }
 
+// ---- variables: bind design tokens to nodes by name ("collection/variable", e.g. "light/primary")
+var varCache = null; // reset for every command; { byKey: { "collection/name": Variable }, names: { id: "collection/name" } }
+async function loadVars() {
+  if (varCache) return varCache;
+  var byKey = {}, names = {}, collections = [];
+  if (figma.variables) {
+    var cols = await figma.variables.getLocalVariableCollectionsAsync();
+    var vars = await figma.variables.getLocalVariablesAsync();
+    var colName = {};
+    cols.forEach(function (c) { colName[c.id] = c.name; collections.push(c.name); });
+    vars.forEach(function (v) {
+      var key = (colName[v.variableCollectionId] || "?") + "/" + v.name;
+      byKey[key] = v;
+      names[v.id] = key;
+    });
+  }
+  varCache = { byKey: byKey, names: names, collections: collections };
+  return varCache;
+}
+
+async function findVariable(ref) {
+  var c = await loadVars();
+  if (c.byKey[ref]) return c.byKey[ref];
+  var keys = Object.keys(c.byKey);
+  var last = String(ref).split("/").pop();
+  var close = keys.filter(function (k) { return k.indexOf(last) >= 0; }).slice(0, 6);
+  throw new Error(
+    'Variable "' + ref + '" not found. Use "collection/name", e.g. "light/primary" or "core/radius/md".' +
+    (keys.length === 0 ? " This file has no local variables." : close.length ? " Similar: " + close.join(", ") : "")
+  );
+}
+
+async function toVariablePaint(p) {
+  var variable = await findVariable(p.variable);
+  if (variable.resolvedType !== "COLOR") throw new Error('Variable "' + p.variable + '" is ' + variable.resolvedType + ", not COLOR");
+  var paint = { type: "SOLID", color: { r: 0, g: 0, b: 0 } };
+  if (typeof p.opacity === "number") paint.opacity = p.opacity;
+  return figma.variables.setBoundVariableForPaint(paint, "color", variable);
+}
+
+function varName(alias) {
+  return alias && alias.id ? (varCache && varCache.names[alias.id]) || alias.id : alias;
+}
+
+// Re-point every variable of collection `from` in a subtree to the same-named variable of collection `to`
+// (e.g. light -> dark). Variables of other collections (e.g. core) are left alone.
+async function rebindNode(node, from, to, stats, c) {
+  function target(alias) {
+    var key = alias && alias.id && c.names[alias.id];
+    if (!key || key.indexOf(from + "/") !== 0) return null;
+    var tkey = to + "/" + key.slice(from.length + 1);
+    if (!c.byKey[tkey]) { stats.missing[tkey] = true; return null; }
+    return c.byKey[tkey];
+  }
+  ["fills", "strokes"].forEach(function (k) {
+    if (!(k in node) || !Array.isArray(node[k])) return;
+    var changed = false;
+    var next = node[k].map(function (p) {
+      var a = p.type === "SOLID" && p.boundVariables && p.boundVariables.color;
+      var v = a ? target(a) : null;
+      if (!v) return p;
+      changed = true;
+      stats.rebound++;
+      return figma.variables.setBoundVariableForPaint(p, "color", v);
+    });
+    if (changed) node[k] = next;
+  });
+  var bv = node.boundVariables || {};
+  Object.keys(bv).forEach(function (field) {
+    var a = bv[field];
+    if (field === "fills" || field === "strokes" || !a || Array.isArray(a) || !a.id) return;
+    var v = target(a);
+    if (v) { node.setBoundVariable(field, v); stats.rebound++; }
+  });
+  if ("children" in node) {
+    for (var i = 0; i < node.children.length; i++) await rebindNode(node.children[i], from, to, stats, c);
+  }
+}
+
 // ------------------------------------------------------------- apply props
 async function applyProps(node, spec, isCreate) {
   var type = node.type;
@@ -205,7 +286,7 @@ async function applyProps(node, spec, isCreate) {
     if (has("lineHeight")) node.lineHeight = { unit: "PIXELS", value: spec.lineHeight };
     if (has("letterSpacing")) node.letterSpacing = { unit: "PIXELS", value: spec.letterSpacing };
     if (has("textAutoResize")) node.textAutoResize = spec.textAutoResize;
-    if (has("textColor")) node.fills = toPaints(spec.textColor);
+    if (has("textColor")) node.fills = await toPaintsAsync(spec.textColor);
   }
 
   // --- size / position
@@ -222,7 +303,7 @@ async function applyProps(node, spec, isCreate) {
 
   // --- appearance
   if (has("fills") && "fills" in node) node.fills = await toPaintsAsync(spec.fills);
-  if (has("strokes") && "strokes" in node) node.strokes = toPaints(spec.strokes);
+  if (has("strokes") && "strokes" in node) node.strokes = await toPaintsAsync(spec.strokes);
   if (has("strokeWeight") && "strokeWeight" in node) node.strokeWeight = spec.strokeWeight;
   if (has("strokeAlign") && "strokeAlign" in node) node.strokeAlign = spec.strokeAlign;
   if (has("cornerRadius") && "cornerRadius" in node) node.cornerRadius = spec.cornerRadius;
@@ -265,11 +346,26 @@ async function applyProps(node, spec, isCreate) {
     if (has("layoutPositioning")) node.layoutPositioning = spec.layoutPositioning;
   } else if (
     (has("layoutSizingHorizontal") || has("layoutSizingVertical")) &&
-    node.type === "FRAME" && node.layoutMode !== "NONE"
+    (node.type === "FRAME" || node.type === "COMPONENT") && node.layoutMode !== "NONE"
   ) {
     // a root auto-layout frame can HUG/FIXED itself
     if (has("layoutSizingHorizontal") && spec.layoutSizingHorizontal !== "FILL") node.layoutSizingHorizontal = spec.layoutSizingHorizontal;
     if (has("layoutSizingVertical") && spec.layoutSizingVertical !== "FILL") node.layoutSizingVertical = spec.layoutSizingVertical;
+  }
+
+  // --- variable bindings, last so layout and size are already set: { field: "collection/name" | null }
+  if (has("bind") && spec.bind) {
+    var fields = Object.keys(spec.bind);
+    for (var bi = 0; bi < fields.length; bi++) {
+      if (typeof node.setBoundVariable !== "function") throw new Error(type + " cannot bind variables");
+      var ref = spec.bind[fields[bi]];
+      var bound = ref === null ? null : await findVariable(ref);
+      try {
+        node.setBoundVariable(fields[bi], bound);
+      } catch (e) {
+        throw new Error('Cannot bind "' + fields[bi] + '" on ' + type + ": " + ((e && e.message) || e));
+      }
+    }
   }
 }
 
@@ -280,6 +376,7 @@ async function createNodeTree(spec, parent, created, anim) {
   var node;
   switch (type) {
     case "FRAME": node = figma.createFrame(); break;
+    case "COMPONENT": node = figma.createComponent(); break;
     case "RECTANGLE": node = figma.createRectangle(); break;
     case "ELLIPSE": node = figma.createEllipse(); break;
     case "TEXT": node = figma.createText(); break;
@@ -291,7 +388,7 @@ async function createNodeTree(spec, parent, created, anim) {
   parent.appendChild(node);
   if (anim) node.opacity = 0; // hide immediately so nothing flashes while it is being built
   // new frames have a white fill by default; make it explicit unless user set fills
-  if (type === "FRAME" && spec.fills === undefined) node.fills = [];
+  if ((type === "FRAME" || type === "COMPONENT") && spec.fills === undefined) node.fills = [];
   if (type === "TEXT" && spec.characters === undefined) spec = Object.assign({ characters: "" }, spec);
   if (type === "TEXT" && spec.fills === undefined && spec.textColor === undefined) {
     node.fills = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }];
@@ -319,7 +416,11 @@ function simplifyPaints(paints) {
   if (paints === figma.mixed) return "mixed";
   if (!paints) return [];
   return paints.map(function (p) {
-    if (p.type === "SOLID") return { type: "SOLID", color: rgbToHex(p.color, p.opacity === undefined ? 1 : p.opacity) };
+    if (p.type === "SOLID") {
+      var sp = { type: "SOLID", color: rgbToHex(p.color, p.opacity === undefined ? 1 : p.opacity) };
+      if (p.boundVariables && p.boundVariables.color) sp.variable = varName(p.boundVariables.color);
+      return sp;
+    }
     if (p.type === "IMAGE") return { type: "IMAGE", imageHash: p.imageHash, scaleMode: p.scaleMode };
     return { type: p.type };
   });
@@ -355,6 +456,15 @@ function serialize(node, depth) {
     o.characters = node.characters;
     o.fontSize = node.fontSize === figma.mixed ? "mixed" : node.fontSize;
     o.fontName = node.fontName === figma.mixed ? "mixed" : node.fontName;
+  }
+  if (node.boundVariables) {
+    var bound = {};
+    Object.keys(node.boundVariables).forEach(function (k) {
+      if (k === "fills" || k === "strokes") return; // shown on the paints themselves
+      var a = node.boundVariables[k];
+      bound[k] = Array.isArray(a) ? a.map(varName) : varName(a);
+    });
+    if (Object.keys(bound).length) o.bound = bound;
   }
   if ("children" in node) {
     if (depth > 0) o.children = node.children.map(function (c) { return serialize(c, depth - 1); });
@@ -524,6 +634,39 @@ var handlers = {
     };
   },
 
+  // Combine COMPONENT nodes into one component set. Names must be "Property=Value, Property=Value".
+  combine_variants: async function (p) {
+    if (!Array.isArray(p.ids) || p.ids.length < 1) throw new Error("ids: at least one COMPONENT node id is required");
+    var comps = [];
+    for (var i = 0; i < p.ids.length; i++) {
+      var n = await getNode(p.ids[i]);
+      if (n.type !== "COMPONENT") throw new Error("Node " + p.ids[i] + " is " + n.type + ", not COMPONENT");
+      if (!/^[^=,]+=[^=,]+(,\s*[^=,]+=[^=,]+)*$/.test(n.name)) {
+        throw new Error('Component name "' + n.name + '" must look like "variant=default, size=md"');
+      }
+      comps.push(n);
+    }
+    var parent = p.parentId ? await getParent(p.parentId) : comps[0].parent;
+    var set = figma.combineAsVariants(comps, parent);
+    if (p.name) set.name = p.name;
+    await loadVars(); // so the result shows variable names, not ids
+    return serialize(set, 1);
+  },
+
+  // Copy a design to another theme: rebind_variables({id, from:"light", to:"dark"}) after figma_clone.
+  rebind_variables: async function (p) {
+    if (!p.id || !p.from || !p.to) throw new Error("id, from and to are required");
+    var c = await loadVars();
+    [p.from, p.to].forEach(function (n) {
+      if (c.collections.indexOf(n) < 0) throw new Error('Collection "' + n + '" not found. Available: ' + c.collections.join(", "));
+    });
+    var node = await getNode(p.id);
+    var stats = { rebound: 0, missing: {} };
+    await rebindNode(node, p.from, p.to, stats, c);
+    if (p.name) node.name = p.name;
+    return { id: node.id, name: node.name, rebound: stats.rebound, missing: Object.keys(stats.missing) };
+  },
+
   get_selection: async function (p) {
     var depth = p.depth === undefined ? 1 : p.depth;
     return figma.currentPage.selection.map(function (n) { return serialize(n, depth); });
@@ -646,6 +789,8 @@ figma.ui.onmessage = async function (msg) {
   }
   if (!msg || msg.id === undefined) return;
   try {
+    varCache = null;
+    if (msg.command === "get_node" || msg.command === "get_selection" || msg.command === "get_slots") await loadVars();
     var handler = handlers[msg.command];
     if (!handler) throw new Error("Unknown command: " + msg.command);
     var result = await handler(msg.params || {});

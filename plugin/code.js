@@ -220,6 +220,16 @@ function varName(alias) {
   return alias && alias.id ? (varCache && varCache.names[alias.id]) || alias.id : alias;
 }
 
+// Local effect style by name, e.g. "elevation/2".
+async function findEffectStyle(name) {
+  var list = await figma.getLocalEffectStylesAsync();
+  var hit = list.filter(function (s) { return s.name === name; })[0];
+  if (!hit) {
+    throw new Error('Effect style "' + name + '" not found. ' + (list.length ? "Available: " + list.map(function (s) { return s.name; }).join(", ") : "This file has no effect styles; create one with figma_create_effect_style."));
+  }
+  return hit;
+}
+
 // Value for Variable.setValueForMode. COLOR: "#RRGGBB[AA]", {alias:"collection/name"}, or a composed color
 // {color:"collection/name", opacity: 0-100 | "collection/float-variable"} (the color keeps pointing at that variable).
 async function toVariableValue(type, value) {
@@ -336,6 +346,14 @@ async function applyProps(node, spec, isCreate) {
     if (has(k) && k in node) node[k] = spec[k];
   });
   if (has("effects") && "effects" in node) node.effects = (spec.effects || []).map(toEffect);
+  if (has("effectStyle")) {
+    if (typeof node.setEffectStyleIdAsync !== "function") throw new Error(type + " cannot use an effect style");
+    await node.setEffectStyleIdAsync((await findEffectStyle(spec.effectStyle)).id);
+  }
+  if (has("properties")) {
+    if (type !== "INSTANCE") throw new Error('"properties" only works on an INSTANCE node');
+    node.setProperties(spec.properties);
+  }
   if (has("clipsContent") && "clipsContent" in node) node.clipsContent = !!spec.clipsContent;
   if (has("pointCount") && type === "POLYGON") node.pointCount = spec.pointCount;
   if (has("pointCount") && type === "STAR") node.pointCount = spec.pointCount;
@@ -482,6 +500,7 @@ function serialize(node, depth) {
     o.fontSize = node.fontSize === figma.mixed ? "mixed" : node.fontSize;
     o.fontName = node.fontName === figma.mixed ? "mixed" : node.fontName;
   }
+  if (node.type === "INSTANCE" && node.variantProperties) o.variantProperties = node.variantProperties;
   if (node.boundVariables) {
     var bound = {};
     Object.keys(node.boundVariables).forEach(function (k) {
@@ -731,6 +750,53 @@ var handlers = {
     if (p.description !== undefined) v.description = p.description;
     if (Array.isArray(p.scopes)) v.scopes = p.scopes;
     return { id: v.id, name: key, type: v.resolvedType, created: created };
+  },
+
+  // Instance of a COMPONENT, or of the variant of a COMPONENT_SET that matches `variant` (default: its first match).
+  create_instance: async function (p) {
+    if (!p.id) throw new Error("id (a COMPONENT or COMPONENT_SET node id) is required");
+    var src = await getNode(p.id);
+    var comp = src;
+    if (src.type === "COMPONENT_SET") {
+      var want = p.variant || {};
+      var keys = Object.keys(want);
+      comp = src.children.filter(function (c) {
+        return c.type === "COMPONENT" && keys.every(function (k) { return c.variantProperties && String(c.variantProperties[k]) === String(want[k]); });
+      })[0];
+      if (!comp) throw new Error("No variant of " + src.name + " matches " + JSON.stringify(want));
+    } else if (src.type !== "COMPONENT") {
+      throw new Error("Node " + p.id + " is " + src.type + ", not COMPONENT or COMPONENT_SET");
+    }
+    var inst = comp.createInstance();
+    (await getParent(p.parentId)).appendChild(inst);
+    await applyProps(inst, p.props || {}, true);
+    await loadVars();
+    return serialize(inst, 2);
+  },
+
+  // Create an effect style, or update it if the name exists. effects use the same format as node `effects`.
+  create_effect_style: async function (p) {
+    if (!p.name || !Array.isArray(p.effects)) throw new Error("name and effects (an array) are required");
+    var list = await figma.getLocalEffectStylesAsync();
+    var st = list.filter(function (s) { return s.name === p.name; })[0];
+    var created = !st;
+    if (!st) { st = figma.createEffectStyle(); st.name = p.name; }
+    st.effects = p.effects.map(toEffect);
+    if (p.description !== undefined) st.description = p.description;
+    return { id: st.id, name: st.name, created: created, effects: st.effects.length };
+  },
+
+  // Read-only: local effect, text and paint styles.
+  list_styles: async function () {
+    var fx = await figma.getLocalEffectStylesAsync();
+    var tx = await figma.getLocalTextStylesAsync();
+    var pt = await figma.getLocalPaintStylesAsync();
+    var brief = function (s) { return { id: s.id, name: s.name }; };
+    return {
+      effect: fx.map(function (s) { return { id: s.id, name: s.name, effects: s.effects.length }; }),
+      text: tx.map(brief),
+      paint: pt.map(brief),
+    };
   },
 
   get_selection: async function (p) {

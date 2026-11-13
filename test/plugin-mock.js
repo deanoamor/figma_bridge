@@ -7,6 +7,18 @@ let idc = 0;
 const mixed = Symbol("mixed");
 const opacityLog = []; // every opacity write: { id, v }
 class Node {
+  get variantProperties() {
+    if (this._vp) return this._vp;
+    if (this.type !== "COMPONENT") return null;
+    return Object.fromEntries(this.name.split(",").map((kv) => kv.trim().split("=")));
+  }
+  createInstance() {
+    const i = new Node("INSTANCE"); nodes.set(i.id, i);
+    i._vp = { ...this.variantProperties }; i.fills = []; page.appendChild(i);
+    i.setProperties = function (props) { Object.assign(this._vp, props); };
+    return i;
+  }
+  async setEffectStyleIdAsync(id) { this.effectStyleId = id; }
   get opacity() { return this._o; }
   set opacity(v) { this._o = v; opacityLog.push({ id: this.id, v }); }
   constructor(type) {
@@ -14,7 +26,7 @@ class Node {
     this.x = 0; this.y = 0; this.width = 100; this.height = 100; this._o = 1; this.rotation = 0;
     this.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }]; this.strokes = []; this.strokeWeight = 1;
     this.effects = []; this.cornerRadius = 0; this.visible = true; this.boundVariables = {};
-    if (type === "FRAME" || type === "COMPONENT" || type === "COMPONENT_SET") {
+    if (type === "FRAME" || type === "COMPONENT" || type === "COMPONENT_SET" || type === "INSTANCE") {
       this.children = []; this.layoutMode = "NONE"; this.itemSpacing = 0;
       this.paddingTop = this.paddingRight = this.paddingBottom = this.paddingLeft = 0;
       this.primaryAxisAlignItems = "MIN"; this.counterAxisAlignItems = "MIN"; this.clipsContent = true;
@@ -45,6 +57,7 @@ const reg = (n) => (nodes.set(n.id, n), n);
 const page = reg(new Node("PAGE")); page.name = "Page 1";
 const sent = [];
 const fontsLoaded = [];
+const effectStyles = [];
 const mkVar = (o) => ({ description: "", scopes: [], values: {}, setValueForMode(m, val) { this.values[m] = val; }, ...o });
 const varList = [
   mkVar({ id: "V:1", name: "radius/md", resolvedType: "FLOAT", value: 12, variableCollectionId: "VC:1" }),
@@ -67,6 +80,10 @@ const figma = {
     if (!bytes.length || bytes[0] !== 0x89) throw new Error("unsupported image");
     return { hash: "hash" + Buffer.from(bytes).toString("hex").slice(0, 12) };
   },
+  getLocalEffectStylesAsync: async () => effectStyles,
+  getLocalTextStylesAsync: async () => [],
+  getLocalPaintStylesAsync: async () => [],
+  createEffectStyle: () => { const s = { id: `S:${effectStyles.length + 1}`, name: "", effects: [], description: "" }; effectStyles.push(s); return s; },
   combineAsVariants(comps, parent) {
     const set = reg(new Node("COMPONENT_SET")); parent.appendChild(set);
     comps.forEach((c) => set.appendChild(c));
@@ -472,5 +489,46 @@ assert.equal(r.ok, false); assert.match(r.error, /0 to 100/);
 r = await call("create_variable", { collection: "light", name: "primary", type: "FLOAT", value: 1 });
 assert.equal(r.ok, false); assert.match(r.error, /exists as COLOR/);
 console.log("ok: create_variable");
+
+// instances: pick a variant, move to a parent, switch with `properties`
+r = await call("create", { spec: { type: "COMPONENT", name: "variant=default, size=md" } });
+const vA = r.result.created[0];
+r = await call("create", { spec: { type: "COMPONENT", name: "variant=outline, size=md" } });
+const vB = r.result.created[0];
+r = await call("combine_variants", { ids: [vA.id, vB.id], name: "Btn" });
+const btnSet = r.result;
+r = await call("create", { spec: { type: "FRAME", name: "dialog row", layoutMode: "HORIZONTAL" } });
+const row = r.result.created[0];
+r = await call("create_instance", { id: btnSet.id, variant: { variant: "outline" }, parentId: row.id, props: { name: "Cancel" } });
+assert.equal(r.ok, true, r.error);
+assert.equal(r.result.type, "INSTANCE"); assert.equal(r.result.name, "Cancel");
+assert.equal(r.result.variantProperties.variant, "outline");
+const inst = r.result.id;
+assert.equal(nodes.get(inst).parent.id, row.id); // placed inside the parent
+r = await call("update", { id: inst, props: { properties: { variant: "default" } } });
+assert.equal(r.result.variantProperties.variant, "default");
+r = await call("create_instance", { id: btnSet.id, variant: { variant: "ghost" } });
+assert.equal(r.ok, false); assert.match(r.error, /No variant of Btn matches/);
+r = await call("create_instance", { id: row.id });
+assert.equal(r.ok, false); assert.match(r.error, /not COMPONENT or COMPONENT_SET/);
+r = await call("update", { id: row.id, props: { properties: { a: "b" } } });
+assert.equal(r.ok, false); assert.match(r.error, /only works on an INSTANCE/);
+console.log("ok: create_instance and properties");
+
+// effect styles: list, create (and update in place), apply, errors
+r = await call("update", { id: row.id, props: { effectStyle: "elevation/2" } });
+assert.equal(r.ok, false); assert.match(r.error, /no effect styles/);
+r = await call("create_effect_style", { name: "elevation/2", effects: [{ type: "DROP_SHADOW", color: "#000000", opacity: 0.12, y: 8, blur: 24 }], description: "overlay" });
+assert.equal(r.ok, true, r.error); assert.equal(r.result.created, true); assert.equal(r.result.effects, 1);
+r = await call("create_effect_style", { name: "elevation/2", effects: [{ type: "DROP_SHADOW", y: 4, blur: 8 }] });
+assert.equal(r.result.created, false); assert.equal(effectStyles.length, 1); // updated, not duplicated
+r = await call("update", { id: row.id, props: { effectStyle: "elevation/2" } });
+assert.equal(r.ok, true, r.error); assert.equal(nodes.get(row.id).effectStyleId, "S:1");
+r = await call("update", { id: row.id, props: { effectStyle: "nope" } });
+assert.equal(r.ok, false); assert.match(r.error, /Available: elevation\/2/);
+r = await call("list_styles", {});
+assert.equal(JSON.stringify(r.result.effect), JSON.stringify([{ id: "S:1", name: "elevation/2", effects: 1 }]));
+assert.equal(r.result.text.length, 0);
+console.log("ok: effect styles");
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

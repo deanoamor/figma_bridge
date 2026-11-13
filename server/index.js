@@ -271,6 +271,8 @@ Node spec (JSON object). Common fields:
 - strokes: same format as fills (solid/gradient only); strokeWeight; strokeAlign: INSIDE|OUTSIDE|CENTER
 - cornerRadius (number) or topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius
 - effects: [{type:"DROP_SHADOW"|"INNER_SHADOW",color:"#hex",opacity?,x,y,blur,spread?}] or [{type:"LAYER_BLUR",blur}]
+- effectStyle: name of a local effect style, e.g. "elevation/2" (see figma_list_styles, figma_create_effect_style)
+- properties (INSTANCE only): component properties, e.g. {variant:"outline", disabled:"true"}
 - clipsContent (frames)
 Auto layout (frames): layoutMode "HORIZONTAL"|"VERTICAL"|"NONE", itemSpacing, padding (all sides) or paddingTop/Right/Bottom/Left,
   primaryAxisAlignItems MIN|CENTER|MAX|SPACE_BETWEEN, counterAxisAlignItems MIN|CENTER|MAX|BASELINE,
@@ -368,6 +370,49 @@ mcp.registerTool(
     },
   },
   wrap("create_variable")
+);
+
+mcp.registerTool(
+  "figma_create_instance",
+  {
+    description:
+      "Create an instance of a component. `id` is a COMPONENT, or a COMPONENT_SET (then `variant` picks the variant, " +
+      'e.g. {variant:"outline", size:"md"}; every key must match). `props` are normal node props applied to the instance ' +
+      "(x, y, name, layoutSizingHorizontal, ...). Put it inside a parent with `parentId` (default: the current page). " +
+      'Change it later with figma_update props {properties:{variant:"destructive"}}.',
+    inputSchema: {
+      id: z.string().describe("COMPONENT or COMPONENT_SET node id"),
+      variant: z.record(z.string()).optional().describe("Variant property values to match in a component set"),
+      parentId: z.string().optional().describe("Parent node id. Default: current page."),
+      props: z.record(z.any()).optional().describe("Node props to apply to the instance"),
+    },
+  },
+  wrap("create_instance")
+);
+
+mcp.registerTool(
+  "figma_create_effect_style",
+  {
+    description:
+      "Create an effect style (e.g. the shadow \"elevation/2\"), or update it if the name exists. `effects` use the same " +
+      'format as node effects: [{type:"DROP_SHADOW", color:"#000000", opacity:0.12, x:0, y:8, blur:24, spread:0}]. ' +
+      'Apply it to a node with figma_create / figma_update prop effectStyle:"elevation/2".',
+    inputSchema: {
+      name: z.string().describe('Style name, e.g. "elevation/2"'),
+      effects: z.array(z.record(z.any())).describe("Effects, see the tool description"),
+      description: z.string().optional(),
+    },
+  },
+  wrap("create_effect_style")
+);
+
+mcp.registerTool(
+  "figma_list_styles",
+  {
+    description: "List the local effect, text and paint styles in the current file (id and name). Read-only.",
+    inputSchema: {},
+  },
+  wrap("list_styles")
 );
 
 mcp.registerTool(

@@ -65,11 +65,11 @@ const figma = {
     return set;
   },
   variables: {
-    getLocalVariableCollectionsAsync: async () => [{ id: "VC:1", name: "core" }, { id: "VC:2", name: "light" }, { id: "VC:3", name: "dark" }],
+    getLocalVariableCollectionsAsync: async () => [{ id: "VC:1", name: "core", modes: [{ name: "Mode 1" }] }, { id: "VC:2", name: "light", modes: [{ name: "Light" }] }, { id: "VC:3", name: "dark", modes: [{ name: "Dark" }] }],
     getLocalVariablesAsync: async () => [
       { id: "V:1", name: "radius/md", resolvedType: "FLOAT", value: 12, variableCollectionId: "VC:1" },
       { id: "V:2", name: "space/2", resolvedType: "FLOAT", value: 8, variableCollectionId: "VC:1" },
-      { id: "V:3", name: "primary", resolvedType: "COLOR", variableCollectionId: "VC:2" },
+      { id: "V:3", name: "primary", resolvedType: "COLOR", description: "Brand color.", variableCollectionId: "VC:2" },
       { id: "V:4", name: "primary", resolvedType: "COLOR", variableCollectionId: "VC:3" },
       { id: "V:5", name: "ring", resolvedType: "COLOR", variableCollectionId: "VC:2" }, // no dark/ring on purpose
     ],
@@ -420,5 +420,19 @@ assert.equal(r.result.bound.cornerRadius, "core/radius/md");
 r = await call("rebind_variables", { id: themed.id, from: "light", to: "nope" });
 assert.equal(r.ok, false); assert.match(r.error, /Collection "nope" not found/);
 console.log("ok: rebind_variables");
+
+// list_variables groups variables by collection (with modes and descriptions)
+r = await call("list_variables", {});
+assert.equal(r.ok, true, r.error);
+assert.equal(JSON.stringify(r.result.map((c) => c.name)), JSON.stringify(["core", "light", "dark"]));
+const lightCol = r.result.find((c) => c.name === "light");
+assert.equal(lightCol.variableCount, 2); // primary + ring; variables of the other collections are not counted
+assert.equal(JSON.stringify(lightCol.modes), JSON.stringify(["Light"]));
+// JSON: vm objects are cross-realm, so deepEqual would fail
+assert.equal(JSON.stringify(lightCol.variables), JSON.stringify([
+  { id: "V:3", name: "primary", type: "COLOR", hasDescription: true },
+  { id: "V:5", name: "ring", type: "COLOR", hasDescription: false },
+]));
+console.log("ok: list_variables");
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

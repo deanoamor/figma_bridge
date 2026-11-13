@@ -667,6 +667,24 @@ var handlers = {
     return { id: node.id, name: node.name, rebound: stats.rebound, missing: Object.keys(stats.missing) };
   },
 
+  // Read-only: local variable collections and their variables (used to bind tokens to nodes by name).
+  list_variables: async function () {
+    var cols = await figma.variables.getLocalVariableCollectionsAsync();
+    var vars = await figma.variables.getLocalVariablesAsync();
+    return cols.map(function (c) {
+      var own = vars.filter(function (v) { return v.variableCollectionId === c.id; });
+      return {
+        id: c.id,
+        name: c.name,
+        modes: c.modes.map(function (m) { return m.name; }),
+        variableCount: own.length,
+        variables: own.map(function (v) {
+          return { id: v.id, name: v.name, type: v.resolvedType, hasDescription: !!v.description };
+        }),
+      };
+    });
+  },
+
   get_selection: async function (p) {
     var depth = p.depth === undefined ? 1 : p.depth;
     return figma.currentPage.selection.map(function (n) { return serialize(n, depth); });

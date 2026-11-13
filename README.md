@@ -154,6 +154,7 @@ Saat Claude membuat desain, node dimunculkan satu per satu dengan fade-in dari w
 |---|---|
 | `figma_status` | Cek koneksi, nama file, halaman, jumlah seleksi |
 | `figma_get_selection` | Baca node yang sedang dipilih |
+| `figma_list_variables` | Daftar collection dan variable lokal di file (hanya baca) |
 | `figma_get_node` | Baca node (atau halaman) berdasarkan id |
 | `figma_get_slots` | Baca slot Sumber dan Target (teks berurutan, gambar, struktur) |
 | `figma_set_slot` | Isi atau kosongkan slot (dari id atau seleksi saat ini) |

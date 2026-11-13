@@ -338,6 +338,17 @@ mcp.registerTool(
 );
 
 mcp.registerTool(
+  "figma_list_variables",
+  {
+    description:
+      "List the local Figma variable collections in the current file with their modes and variables (id, name, type, " +
+      "whether a description is set). Read-only. Use it to learn which variable names exist before binding tokens.",
+    inputSchema: {},
+  },
+  wrap("list_variables")
+);
+
+mcp.registerTool(
   "figma_get_slots",
   {
     description:

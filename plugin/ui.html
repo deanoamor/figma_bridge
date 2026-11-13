@@ -1,0 +1,153 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 12px Inter, system-ui, sans-serif; margin: 0; padding: 12px; color: #222; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #e5484d; flex: none; }
+  .dot.on { background: #30a46c; }
+  #status { font-weight: 600; }
+  .slot { border: 1px solid #e3e3e3; border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; }
+  .slot-title { font-weight: 600; margin-bottom: 6px; }
+  .slot-body { display: flex; align-items: center; gap: 6px; }
+  .slot-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #777; }
+  .slot-name.set { color: #222; }
+  .slot button { font: inherit; cursor: pointer; }
+  #log { height: 90px; overflow: auto; background: #f6f6f6; border-radius: 6px; padding: 6px 8px;
+         font: 11px ui-monospace, Menlo, monospace; white-space: pre-wrap; }
+  .hint { color: #777; margin-top: 8px; line-height: 1.4; }
+</style>
+</head>
+<body>
+  <div class="row"><span id="dot" class="dot"></span><span id="status">Disconnected</span></div>
+  <div class="row">
+    <label for="port">Port</label>
+    <input id="port" type="number" value="3055" style="width:70px">
+  </div>
+  <div class="row">
+    <label><input id="anim" type="checkbox" checked> Animasi build</label>
+    <select id="speed">
+      <option value="fast">Cepat</option>
+      <option value="normal" selected>Normal</option>
+      <option value="slow">Lambat</option>
+    </select>
+  </div>
+  <div class="slot">
+    <div class="slot-title">1 · Sumber informasi</div>
+    <div class="slot-body">
+      <span id="source-name" class="slot-name">belum dipilih</span>
+      <button id="source-set">Pakai seleksi</button>
+      <button id="source-clear" title="Kosongkan">×</button>
+    </div>
+  </div>
+  <div class="slot">
+    <div class="slot-title">2 · Target desain</div>
+    <div class="slot-body">
+      <span id="target-name" class="slot-name">belum dipilih</span>
+      <button id="target-set">Pakai seleksi</button>
+      <button id="target-clear" title="Kosongkan">×</button>
+    </div>
+  </div>
+  <div id="log"></div>
+  <div class="hint">Keep this window open while Claude is working. It reconnects automatically.</div>
+
+<script>
+  const dot = document.getElementById("dot");
+  const statusEl = document.getElementById("status");
+  const logEl = document.getElementById("log");
+  const portEl = document.getElementById("port");
+  const animEl = document.getElementById("anim");
+  const speedEl = document.getElementById("speed");
+  let ws = null;
+  let retry = null;
+
+  function log(line) {
+    const t = new Date().toLocaleTimeString();
+    logEl.textContent += `[${t}] ${line}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+    if (logEl.textContent.length > 20000) logEl.textContent = logEl.textContent.slice(-10000);
+  }
+  function setStatus(on, text) {
+    dot.classList.toggle("on", on);
+    statusEl.textContent = text;
+  }
+
+  function connect() {
+    clearTimeout(retry);
+    const port = Number(portEl.value) || 3055;
+    try { ws = new WebSocket(`ws://localhost:${port}`); }
+    catch (e) { log("WebSocket error: " + e.message); retry = setTimeout(connect, 2000); return; }
+
+    ws.onopen = () => {
+      setStatus(true, "Connected to Claude");
+      log("connected");
+      ws.send(JSON.stringify({ type: "hello" }));
+    };
+    ws.onclose = () => {
+      setStatus(false, "Disconnected (retrying...)");
+      retry = setTimeout(connect, 2000);
+    };
+    ws.onerror = () => { /* onclose follows */ };
+    ws.onmessage = (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      log(`> ${msg.command}`);
+      parent.postMessage({ pluginMessage: msg }, "*");
+    };
+  }
+
+  // results coming back from code.js
+  onmessage = (ev) => {
+    const msg = ev.data && ev.data.pluginMessage;
+    if (msg && msg.type === "settings") {
+      animEl.checked = !!msg.animate;
+      speedEl.value = msg.speed || "normal";
+      speedEl.disabled = !animEl.checked;
+      return;
+    }
+    if (msg && msg.type === "slots") {
+      showSlot("source", msg.source);
+      showSlot("target", msg.target);
+      return;
+    }
+    if (!msg || msg.id === undefined) return;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+      log(msg.ok ? "< ok" : "< error: " + msg.error);
+    }
+  };
+
+  portEl.addEventListener("change", () => { if (ws) ws.close(); connect(); });
+
+  function sendSettings() {
+    speedEl.disabled = !animEl.checked;
+    parent.postMessage({ pluginMessage: { type: "settings", animate: animEl.checked, speed: speedEl.value } }, "*");
+  }
+  function showSlot(slot, nodes) {
+    const el = document.getElementById(slot + "-name");
+    if (!nodes || nodes.length === 0) {
+      el.textContent = "belum dipilih";
+      el.title = "";
+      el.classList.remove("set");
+    } else {
+      el.textContent = nodes.length === 1 ? nodes[0].name : `${nodes.length} node (${nodes[0].name}, ...)`;
+      el.title = nodes.map((n) => n.name).join(", ");
+      el.classList.add("set");
+    }
+  }
+  for (const slot of ["source", "target"]) {
+    document.getElementById(slot + "-set").addEventListener("click", () =>
+      parent.postMessage({ pluginMessage: { type: "set-slot", slot } }, "*"));
+    document.getElementById(slot + "-clear").addEventListener("click", () =>
+      parent.postMessage({ pluginMessage: { type: "clear-slot", slot } }, "*"));
+  }
+
+  animEl.addEventListener("change", sendSettings);
+  speedEl.addEventListener("change", sendSettings);
+
+  connect();
+  parent.postMessage({ pluginMessage: { type: "ready" } }, "*"); // ask code.js for saved settings
+</script>
+</body>
+</html>

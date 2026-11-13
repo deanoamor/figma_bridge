@@ -1,0 +1,16 @@
+{
+  "name": "figma-claude-bridge",
+  "version": "1.0.0",
+  "description": "MCP server that lets Claude control Figma through a local plugin",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node test/smoke.js && node test/relay.js && node test/image.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  }
+}

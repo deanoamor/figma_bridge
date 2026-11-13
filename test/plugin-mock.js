@@ -435,4 +435,9 @@ assert.equal(JSON.stringify(lightCol.variables), JSON.stringify([
 ]));
 console.log("ok: list_variables");
 
+// opacity on a variable paint is refused (Figma cannot keep both)
+r = await call("create", { spec: { type: "RECTANGLE", fills: [{ type: "SOLID", variable: "light/primary", opacity: 0.14 }] } });
+assert.equal(r.ok, false); assert.match(r.error, /already has alpha/);
+console.log("ok: opacity on variable paint is refused");
+
 console.log("\nPLUGIN MOCK TESTS PASSED");

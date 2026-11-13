@@ -208,9 +208,12 @@ async function findVariable(ref) {
 async function toVariablePaint(p) {
   var variable = await findVariable(p.variable);
   if (variable.resolvedType !== "COLOR") throw new Error('Variable "' + p.variable + '" is ' + variable.resolvedType + ", not COLOR");
-  var paint = { type: "SOLID", color: { r: 0, g: 0, b: 0 } };
-  if (typeof p.opacity === "number") paint.opacity = p.opacity;
-  return figma.variables.setBoundVariableForPaint(paint, "color", variable);
+  // Figma drops opacity on a variable paint, or loses the variable's color if it is added afterwards,
+  // so refuse instead of drawing a wrong color. For a tint, use a variable that already contains alpha.
+  if (typeof p.opacity === "number" && p.opacity < 1) {
+    throw new Error('opacity cannot be combined with variable "' + p.variable + '". Use a variable whose value already has alpha (e.g. "light/success-subtle").');
+  }
+  return figma.variables.setBoundVariableForPaint({ type: "SOLID", color: { r: 0, g: 0, b: 0 } }, "color", variable);
 }
 
 function varName(alias) {

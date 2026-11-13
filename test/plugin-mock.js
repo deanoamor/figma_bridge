@@ -13,8 +13,8 @@ class Node {
     this.id = `1:${++idc}`; this.type = type; this.name = type; this.parent = null;
     this.x = 0; this.y = 0; this.width = 100; this.height = 100; this._o = 1; this.rotation = 0;
     this.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }]; this.strokes = []; this.strokeWeight = 1;
-    this.effects = []; this.cornerRadius = 0; this.visible = true;
-    if (type === "FRAME") {
+    this.effects = []; this.cornerRadius = 0; this.visible = true; this.boundVariables = {};
+    if (type === "FRAME" || type === "COMPONENT" || type === "COMPONENT_SET") {
       this.children = []; this.layoutMode = "NONE"; this.itemSpacing = 0;
       this.paddingTop = this.paddingRight = this.paddingBottom = this.paddingLeft = 0;
       this.primaryAxisAlignItems = "MIN"; this.counterAxisAlignItems = "MIN"; this.clipsContent = true;
@@ -33,6 +33,11 @@ class Node {
     this.parent.appendChild(c); // real Figma places the clone next to the original
     return c;
   }
+  setBoundVariable(field, variable) {
+    if (!["cornerRadius", "itemSpacing", "strokeWeight", "paddingLeft", "height"].includes(field)) throw new Error("invalid field " + field);
+    if (variable) { this[field] = variable.value; this.boundVariables[field] = { type: "VARIABLE_ALIAS", id: variable.id }; }
+    else delete this.boundVariables[field];
+  }
   async exportAsync() { return new Uint8Array([1, 2, 3]); }
 }
 const nodes = new Map();
@@ -43,7 +48,7 @@ const fontsLoaded = [];
 const figma = {
   mixed, currentPage: page, root: { name: "Test file", children: [page] },
   viewport: { scrollAndZoomIntoView() {} },
-  createFrame: () => reg(new Node("FRAME")), createRectangle: () => reg(new Node("RECTANGLE")),
+  createFrame: () => reg(new Node("FRAME")), createComponent: () => reg(new Node("COMPONENT")), createRectangle: () => reg(new Node("RECTANGLE")),
   createEllipse: () => reg(new Node("ELLIPSE")), createText: () => reg(new Node("TEXT")),
   createLine: () => reg(new Node("LINE")), createPolygon: () => reg(new Node("POLYGON")), createStar: () => reg(new Node("STAR")),
   getNodeByIdAsync: async (id) => nodes.get(id) || null,
@@ -53,6 +58,20 @@ const figma = {
   createImage: (bytes) => {
     if (!bytes.length || bytes[0] !== 0x89) throw new Error("unsupported image");
     return { hash: "hash" + Buffer.from(bytes).toString("hex").slice(0, 12) };
+  },
+  combineAsVariants(comps, parent) {
+    const set = reg(new Node("COMPONENT_SET")); parent.appendChild(set);
+    comps.forEach((c) => set.appendChild(c));
+    return set;
+  },
+  variables: {
+    getLocalVariableCollectionsAsync: async () => [{ id: "VC:1", name: "core" }, { id: "VC:2", name: "light" }],
+    getLocalVariablesAsync: async () => [
+      { id: "V:1", name: "radius/md", resolvedType: "FLOAT", value: 12, variableCollectionId: "VC:1" },
+      { id: "V:2", name: "space/2", resolvedType: "FLOAT", value: 8, variableCollectionId: "VC:1" },
+      { id: "V:3", name: "primary", resolvedType: "COLOR", variableCollectionId: "VC:2" },
+    ],
+    setBoundVariableForPaint: (paint, field, variable) => ({ ...paint, boundVariables: { [field]: { type: "VARIABLE_ALIAS", id: variable.id } } }),
   },
   showUI() {}, ui: { postMessage: (m) => sent.push(m), onmessage: null },
 };
@@ -333,5 +352,50 @@ assert.equal(r.ok, false); assert.match(r.error, /could not read this image/);
 r = await call("create", { spec: { type: "RECTANGLE", fills: [{ type: "IMAGE", base64: PNG_B64, scaleMode: "STRETCH" }] } });
 assert.equal(r.ok, false); assert.match(r.error, /scaleMode must be/);
 console.log("ok: image errors");
+
+// components, variable bindings and variants
+r = await call("create", { spec: {
+  type: "COMPONENT", name: "variant=default, size=md", layoutMode: "HORIZONTAL", cornerRadius: 1, itemSpacing: 1,
+  fills: [{ type: "SOLID", variable: "light/primary" }],
+  bind: { cornerRadius: "core/radius/md", itemSpacing: "core/space/2" },
+  children: [{ type: "TEXT", characters: "Deploy", textColor: "var:light/primary" }],
+} });
+assert.equal(r.ok, true, r.error);
+const comp = r.result.created[0];
+assert.equal(comp.type, "COMPONENT");
+r = await call("get_node", { id: comp.id, depth: 1 });
+assert.equal(r.result.fills[0].variable, "light/primary");
+assert.equal(r.result.bound.cornerRadius, "core/radius/md");
+assert.equal(r.result.bound.itemSpacing, "core/space/2");
+assert.equal(r.result.cornerRadius, 12); // value comes from the variable
+assert.equal(r.result.children[0].fills[0].variable, "light/primary");
+console.log("ok: COMPONENT with variable fills and bound fields");
+
+r = await call("update", { id: comp.id, props: { bind: { cornerRadius: null } } });
+r = await call("get_node", { id: comp.id, depth: 0 });
+assert.equal(r.result.bound.cornerRadius, undefined);
+console.log("ok: unbind with null");
+
+r = await call("create", { spec: { type: "RECTANGLE", fills: "var:light/primry" } });
+assert.equal(r.ok, false); assert.match(r.error, /not found/); assert.match(r.error, /light\/primary/);
+r = await call("create", { spec: { type: "RECTANGLE", fills: "var:core/radius/md" } });
+assert.equal(r.ok, false); assert.match(r.error, /not COLOR/);
+r = await call("create", { spec: { type: "RECTANGLE", bind: { bogus: "core/radius/md" } } });
+assert.equal(r.ok, false); assert.match(r.error, /Cannot bind "bogus"/);
+console.log("ok: variable errors");
+
+r = await call("create", { spec: { type: "COMPONENT", name: "variant=outline, size=md" } });
+const comp2 = r.result.created[0];
+r = await call("create", { spec: { type: "COMPONENT", name: "Button" } });
+const badName = r.result.created[0];
+r = await call("combine_variants", { ids: [comp.id, badName.id] });
+assert.equal(r.ok, false); assert.match(r.error, /must look like/);
+r = await call("combine_variants", { ids: [card.id] });
+assert.equal(r.ok, false); assert.match(r.error, /not COMPONENT/);
+r = await call("combine_variants", { ids: [comp.id, comp2.id], name: "Button" });
+assert.equal(r.ok, true, r.error);
+assert.equal(r.result.type, "COMPONENT_SET"); assert.equal(r.result.name, "Button"); assert.equal(r.result.children.length, 2);
+assert.equal(r.result.children[0].fills[0].variable, "light/primary"); // names, not ids
+console.log("ok: combine_variants");
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

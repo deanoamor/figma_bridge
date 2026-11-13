@@ -257,13 +257,17 @@ const wrap = (command, mapParams = (p) => p) => async (params) => {
 
 const NODE_SPEC_DOC = `
 Node spec (JSON object). Common fields:
-- type: FRAME | RECTANGLE | ELLIPSE | TEXT | LINE | POLYGON | STAR  (default FRAME)
+- type: FRAME | COMPONENT | RECTANGLE | ELLIPSE | TEXT | LINE | POLYGON | STAR  (default FRAME). COMPONENT is a frame that can be combined into variants with figma_combine_variants.
 - name, x, y, width, height, rotation, opacity (0-1), visible
 - fills: "#RRGGBB" | "#RRGGBBAA" | [{type:"SOLID",color:"#hex",opacity?}] | [{type:"GRADIENT_LINEAR",stops:[{position:0,color:"#hex"},...],angle?:deg}] | "none"
 - image fill: fills:[{type:"IMAGE", url:"https://..." | path:"D:/foto/a.png" | fromNodeId:"12:34" | imageHash:"...", scaleMode:"FILL"|"FIT"|"CROP"|"TILE" (default FILL), opacity?}]
   Put it on a RECTANGLE/ELLIPSE/FRAME (e.g. a rectangle with cornerRadius for a rounded photo). PNG, JPEG or GIF only, max 12 MB.
   fromNodeId reuses the first image of an existing node (e.g. a photo from the source slot, see figma_get_slots content.images).
   The same fills format works in figma_update to swap an image. Fills can mix, e.g. [image, gradient overlay].
+- variables (design tokens): refer to a local Figma variable as "collection/name", e.g. "light/primary", "core/radius/md" (the variable name keeps its own slashes).
+  Colors: fills/strokes/textColor accept "var:light/primary" or [{type:"SOLID", variable:"light/primary", opacity?}].
+  Numbers and other fields: bind:{cornerRadius:"core/radius/md", strokeWeight:"core/line/hairline", itemSpacing:"core/space/2", paddingLeft:"core/space/4", height:"core/control/md"}; use null to unbind.
+  Works in figma_create and figma_update. Unknown names fail with similar suggestions; figma_get_node shows bindings as "variable" on paints and "bound" on the node.
 - strokes: same format as fills (solid/gradient only); strokeWeight; strokeAlign: INSIDE|OUTSIDE|CENTER
 - cornerRadius (number) or topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius
 - effects: [{type:"DROP_SHADOW"|"INNER_SHADOW",color:"#hex",opacity?,x,y,blur,spread?}] or [{type:"LAYER_BLUR",blur}]
@@ -297,6 +301,22 @@ mcp.registerTool(
     inputSchema: { depth: z.number().int().min(0).max(6).optional().describe("Child levels to include (default 1)") },
   },
   wrap("get_selection")
+);
+
+mcp.registerTool(
+  "figma_combine_variants",
+  {
+    description:
+      "Combine COMPONENT nodes into one component set (variants). Every component must be named " +
+      '"Property=Value, Property=Value", e.g. "variant=default, size=md"; those names become the variant properties. ' +
+      "Returns the new component set. Create components with figma_create (type COMPONENT) first.",
+    inputSchema: {
+      ids: z.array(z.string()).min(1).describe("COMPONENT node ids to combine"),
+      name: z.string().optional().describe("Name of the component set, e.g. Button"),
+      parentId: z.string().optional().describe("Where to put the set (default: the parent of the first component)"),
+    },
+  },
+  wrap("combine_variants")
 );
 
 mcp.registerTool(

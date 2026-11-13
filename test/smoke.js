@@ -17,7 +17,7 @@ await client.connect(transport);
 const tools = (await client.listTools()).tools.map((t) => t.name).sort();
 console.log("tools:", tools.join(", "));
 assert.deepEqual(tools, [
-  "figma_clone", "figma_create", "figma_delete", "figma_export", "figma_get_node",
+  "figma_clone", "figma_combine_variants", "figma_create", "figma_delete", "figma_export", "figma_get_node",
   "figma_get_selection", "figma_get_slots", "figma_select", "figma_set_slot", "figma_status", "figma_update",
 ]);
 
@@ -61,6 +61,11 @@ console.log("ok: create passes nested spec");
 r = await client.callTool({ name: "figma_update", arguments: { id: "1:3", props: { fills: "#FF0000" } } });
 assert.equal(JSON.parse(r.content[0].text).params.props.fills, "#FF0000");
 console.log("ok: update");
+
+r = await client.callTool({ name: "figma_combine_variants", arguments: { ids: ["1:3", "1:4"], name: "Button" } });
+assert.equal(JSON.parse(r.content[0].text).echo, "combine_variants");
+assert.deepEqual(JSON.parse(r.content[0].text).params.ids, ["1:3", "1:4"]);
+console.log("ok: combine_variants");
 
 r = await client.callTool({ name: "figma_export", arguments: { id: "1:3", scale: 2 } });
 assert.equal(r.content[0].type, "image");

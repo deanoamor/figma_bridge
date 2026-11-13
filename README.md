@@ -164,6 +164,7 @@ Saat Claude membuat desain, node dimunculkan satu per satu dengan fade-in dari w
 | `figma_clone` | Duplikat node |
 | `figma_combine_variants` | Gabungkan node COMPONENT jadi satu component set (variant). Nama komponen harus `property=value, property=value` |
 | `figma_rebind_variables` | Di satu node dan anak-anaknya, pindahkan variable dari satu collection ke variable bernama sama di collection lain (mis. `light` → `dark`) |
+| `figma_create_variable` | Buat atau perbarui satu variable di collection yang sudah ada (warna hex, alias, atau composed color: warna + opacity) |
 | `figma_select` | Pilih node dan zoom ke sana |
 | `figma_export` | Ekspor node jadi gambar supaya Claude bisa melihat hasilnya |
 

@@ -220,6 +220,28 @@ function varName(alias) {
   return alias && alias.id ? (varCache && varCache.names[alias.id]) || alias.id : alias;
 }
 
+// Value for Variable.setValueForMode. COLOR: "#RRGGBB[AA]", {alias:"collection/name"}, or a composed color
+// {color:"collection/name", opacity: 0-100 | "collection/float-variable"} (the color keeps pointing at that variable).
+async function toVariableValue(type, value) {
+  if (value && typeof value === "object" && value.alias !== undefined) {
+    return figma.variables.createVariableAlias(await findVariable(value.alias));
+  }
+  if (type !== "COLOR") return value;
+  if (typeof value === "string") {
+    var c = hexToRgba(value);
+    return { r: c.r, g: c.g, b: c.b, a: c.a };
+  }
+  if (value && typeof value === "object" && value.color !== undefined) {
+    var base = await findVariable(value.color);
+    if (base.resolvedType !== "COLOR") throw new Error('Variable "' + value.color + '" is ' + base.resolvedType + ", not COLOR");
+    var op = value.opacity;
+    if (typeof op === "string") op = figma.variables.createVariableAlias(await findVariable(op));
+    else if (typeof op !== "number" || op < 0 || op > 100) throw new Error("opacity must be a number from 0 to 100 or the name of a FLOAT variable");
+    return { color: figma.variables.createVariableAlias(base), opacity: op };
+  }
+  throw new Error('COLOR value must be "#RRGGBB[AA]", {alias:"collection/name"} or {color:"collection/name", opacity:0-100}');
+}
+
 // Re-point every variable of collection `from` in a subtree to the same-named variable of collection `to`
 // (e.g. light -> dark). Variables of other collections (e.g. core) are left alone.
 async function rebindNode(node, from, to, stats, c) {
@@ -686,6 +708,29 @@ var handlers = {
         }),
       };
     });
+  },
+
+  // Create (or update, if the name already exists in the collection) one variable in an existing collection.
+  create_variable: async function (p) {
+    if (!p.collection || !p.name || !p.type) throw new Error("collection, name and type are required");
+    var c = await loadVars();
+    var cols = await figma.variables.getLocalVariableCollectionsAsync();
+    var col = cols.filter(function (x) { return x.name === p.collection; })[0];
+    if (!col) throw new Error('Collection "' + p.collection + '" not found. Available: ' + c.collections.join(", "));
+    var mode = col.modes[0];
+    if (p.mode) {
+      mode = col.modes.filter(function (m) { return m.name === p.mode; })[0];
+      if (!mode) throw new Error('Mode "' + p.mode + '" not found in "' + p.collection + '". Available: ' + col.modes.map(function (m) { return m.name; }).join(", "));
+    }
+    var key = p.collection + "/" + p.name;
+    var v = c.byKey[key];
+    var created = false;
+    if (!v) { v = figma.variables.createVariable(p.name, col, p.type); created = true; }
+    else if (v.resolvedType !== p.type) throw new Error('"' + key + '" exists as ' + v.resolvedType + ", not " + p.type);
+    if (p.value !== undefined) v.setValueForMode(mode.modeId, await toVariableValue(p.type, p.value));
+    if (p.description !== undefined) v.description = p.description;
+    if (Array.isArray(p.scopes)) v.scopes = p.scopes;
+    return { id: v.id, name: key, type: v.resolvedType, created: created };
   },
 
   get_selection: async function (p) {

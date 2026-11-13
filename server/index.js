@@ -349,6 +349,28 @@ mcp.registerTool(
 );
 
 mcp.registerTool(
+  "figma_create_variable",
+  {
+    description:
+      "Create a variable in an existing collection, or update it if the name already exists there. " +
+      "COLOR value: \"#RRGGBB\" or \"#RRGGBBAA\"; {alias:\"collection/name\"} to point at another variable; or a composed color " +
+      "{color:\"collection/name\", opacity: 0-100 or \"collection/float-variable\"}, which keeps the color linked to that " +
+      "variable (e.g. light/success-subtle = light/success at 14%). FLOAT/STRING/BOOLEAN: the plain value. " +
+      "Optional description and scopes (e.g. [\"ALL_FILLS\"]). Uses the collection's first mode unless `mode` is given.",
+    inputSchema: {
+      collection: z.string().describe('Existing collection name, e.g. "light"'),
+      name: z.string().describe('Variable name inside the collection, e.g. "success-subtle" or "radius/md"'),
+      type: z.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"]),
+      value: z.any().optional().describe("See the tool description"),
+      description: z.string().optional(),
+      scopes: z.array(z.string()).optional(),
+      mode: z.string().optional().describe("Mode name (default: the first mode)"),
+    },
+  },
+  wrap("create_variable")
+);
+
+mcp.registerTool(
   "figma_get_slots",
   {
     description:

@@ -17,7 +17,7 @@ await client.connect(transport);
 const tools = (await client.listTools()).tools.map((t) => t.name).sort();
 console.log("tools:", tools.join(", "));
 assert.deepEqual(tools, [
-  "figma_arrange_variants", "figma_clone", "figma_combine_variants", "figma_create", "figma_create_effect_style", "figma_create_instance", "figma_create_text_style", "figma_create_variable", "figma_delete", "figma_export", "figma_get_node",
+  "figma_apply_text_styles", "figma_arrange_variants", "figma_clone", "figma_combine_variants", "figma_create", "figma_create_effect_style", "figma_create_instance", "figma_create_text_style", "figma_create_variable", "figma_delete", "figma_export", "figma_get_node",
   "figma_get_selection", "figma_get_slots", "figma_list_styles", "figma_list_variables", "figma_rebind_variables", "figma_select", "figma_set_slot", "figma_status", "figma_update",
 ]);
 

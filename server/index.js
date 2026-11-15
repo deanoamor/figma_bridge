@@ -282,6 +282,7 @@ Auto layout (frames): layoutMode "HORIZONTAL"|"VERTICAL"|"NONE", itemSpacing, pa
   primaryAxisAlignItems MIN|CENTER|MAX|SPACE_BETWEEN, counterAxisAlignItems MIN|CENTER|MAX|BASELINE,
   layoutWrap "WRAP"|"NO_WRAP", primaryAxisSizingMode / counterAxisSizingMode "FIXED"|"AUTO".
 Child sizing inside an auto-layout parent: layoutSizingHorizontal / layoutSizingVertical "FIXED"|"HUG"|"FILL", layoutGrow (0|1), layoutAlign.
+An overlay child (focus ring, badge dot): layoutPositioning "ABSOLUTE", then figma_update x/y (they are ignored on create) and constraints {horizontal:"STRETCH", vertical:"STRETCH"} so it follows the parent size.
 Text: characters, fontSize, fontFamily (default "Inter"), fontStyle (default "Regular", e.g. "Bold", "Semi Bold"),
   textAlignHorizontal LEFT|CENTER|RIGHT|JUSTIFIED, textAlignVertical TOP|CENTER|BOTTOM, lineHeight (px number), letterSpacing (px number),
   textAutoResize "WIDTH_AND_HEIGHT"|"HEIGHT"|"NONE", textColor (shortcut for fills on TEXT).
@@ -433,6 +434,21 @@ mcp.registerTool(
     },
   },
   wrap("create_text_style")
+);
+
+mcp.registerTool(
+  "figma_apply_text_styles",
+  {
+    description:
+      "Apply local text styles to every text node under `id` (a page, frame or component set). A text gets the style with " +
+      "the same font family, font style and size; the rest is reported as unmatched. Instance contents are skipped " +
+      "(they follow their main component). Use dryRun first: it only reports.",
+    inputSchema: {
+      id: z.string().describe("Root node id; 0:1 is the page"),
+      dryRun: z.boolean().optional(),
+    },
+  },
+  wrap("apply_text_styles")
 );
 
 mcp.registerTool(

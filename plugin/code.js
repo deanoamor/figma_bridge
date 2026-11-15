@@ -448,6 +448,8 @@ async function applyProps(node, spec, isCreate) {
     if (has("layoutGrow")) node.layoutGrow = spec.layoutGrow;
     if (has("layoutAlign")) node.layoutAlign = spec.layoutAlign;
     if (has("layoutPositioning")) node.layoutPositioning = spec.layoutPositioning;
+    // constraints for an ABSOLUTE child, e.g. {horizontal:"STRETCH", vertical:"STRETCH"}
+    if (has("constraints")) node.constraints = spec.constraints;
   } else if (
     (has("layoutSizingHorizontal") || has("layoutSizingVertical")) &&
     (node.type === "FRAME" || node.type === "COMPONENT") && node.layoutMode !== "NONE"
@@ -890,6 +892,42 @@ var handlers = {
       text: tx.map(brief),
       paint: pt.map(brief),
     };
+  },
+
+  // Apply local text styles to the text nodes under `id` (instance contents are skipped, they inherit from their main
+  // component). A node gets the style with the same font size and font style (and family); anything else is reported
+  // as unmatched. {dryRun:true} only reports.
+  apply_text_styles: async function (p) {
+    var root = await getNode(p.id);
+    var norm = function (s) { return String(s).replace(/\s+/g, "").toLowerCase(); };
+    var styles = await figma.getLocalTextStylesAsync();
+    var applied = {}, unmatched = {}, mixed = 0, already = 0;
+    var texts = [];
+    var walk = function (n) {
+      if (n.type === "TEXT") { texts.push(n); return; }
+      if (n.type === "INSTANCE" || !("children" in n)) return;
+      n.children.forEach(walk);
+    };
+    walk(root);
+    for (var i = 0; i < texts.length; i++) {
+      var t = texts[i];
+      if (t.fontName === figma.mixed || t.fontSize === figma.mixed) { mixed++; continue; }
+      var hit = styles.filter(function (s) {
+        return s.fontSize === t.fontSize && s.fontName.family === t.fontName.family && norm(s.fontName.style) === norm(t.fontName.style);
+      })[0];
+      if (!hit) {
+        var key = t.fontName.family + " " + t.fontName.style + " " + t.fontSize;
+        unmatched[key] = (unmatched[key] || 0) + 1;
+        continue;
+      }
+      if (t.textStyleId === hit.id) { already++; continue; }
+      if (!p.dryRun) {
+        await figma.loadFontAsync(hit.fontName);
+        await t.setTextStyleIdAsync(hit.id);
+      }
+      applied[hit.name] = (applied[hit.name] || 0) + 1;
+    }
+    return { texts: texts.length, dryRun: !!p.dryRun, applied: applied, alreadyStyled: already, unmatched: unmatched, mixed: mixed };
   },
 
   // Lay the variants of a component set out in a tidy grid. `rows` / `columns` are variant property names; a cell

@@ -170,6 +170,7 @@ Saat Claude membuat desain, node dimunculkan satu per satu dengan fade-in dari w
 | `figma_create_effect_style` | Buat atau perbarui effect style (mis. `elevation/2`); pasang ke node dengan `effectStyle` |
 | `figma_create_text_style` | Buat atau perbarui text style (mis. `text/sm`), field-nya bisa diikat ke variable; pasang dengan prop `textStyle` |
 | `figma_list_styles` | Daftar effect, text dan paint style lokal (hanya baca) |
+| `figma_apply_text_styles` | Pasang text style lokal ke semua teks di bawah satu node (cocok lewat family, style dan ukuran font; isi instance dilewati; `dryRun` hanya melapor) |
 | `figma_select` | Pilih node dan zoom ke sana |
 | `figma_export` | Ekspor node jadi gambar supaya Claude bisa melihat hasilnya |
 

@@ -20,7 +20,7 @@ await client.connect(transport);
 const tools = (await client.listTools()).tools.map((t) => t.name).sort();
 console.log("tools:", tools.join(", "));
 assert.deepEqual(tools, [
-  "figma_clone", "figma_combine_variants", "figma_create", "figma_delete", "figma_export", "figma_get_node",
+  "figma_boolean", "figma_clone", "figma_combine_variants", "figma_create", "figma_create_variables", "figma_delete", "figma_export", "figma_get_node",
   "figma_get_selection", "figma_get_slots", "figma_list_children", "figma_list_variables", "figma_rebind_variables", "figma_select", "figma_set_slot", "figma_status", "figma_update",
 ]);
 
@@ -113,6 +113,23 @@ r = await client.callTool({ name: "figma_list_children", arguments: { pageName: 
 assert.equal(JSON.parse(r.content[0].text).echo, "list_children");
 assert.equal(JSON.parse(r.content[0].text).params.pageName, "Web Flow");
 console.log("ok: index + list_children pass through");
+
+// boolean + create_variables pass through; bad input is rejected by the schema before reaching Figma
+r = await client.callTool({ name: "figma_boolean", arguments: { operation: "SUBTRACT", ids: ["1:3", "1:4"], flatten: true, name: "Mark" } });
+assert.deepEqual(JSON.parse(r.content[0].text).params, { operation: "SUBTRACT", ids: ["1:3", "1:4"], flatten: true, name: "Mark" });
+const seenBefore = seen.length;
+r = await client.callTool({ name: "figma_boolean", arguments: { operation: "MERGE", ids: ["1:3", "1:4"] } });
+assert.equal(r.isError, true);
+r = await client.callTool({ name: "figma_boolean", arguments: { operation: "UNION", ids: ["1:3"] } });
+assert.equal(r.isError, true);
+assert.equal(seen.length, seenBefore, "invalid boolean calls never reach the plugin");
+const tokenSpec = { collections: [{ name: "theme", modes: ["Light", "Dark"], variables: [{ name: "primary", type: "COLOR", values: { Light: { alias: "core/blue" }, Dark: "#60A5FA" } }] }] };
+r = await client.callTool({ name: "figma_create_variables", arguments: tokenSpec });
+assert.notEqual(r.isError, true, r.content[0].text);
+assert.deepEqual(JSON.parse(r.content[0].text).params, tokenSpec); // alias objects survive the schema
+r = await client.callTool({ name: "figma_create_variables", arguments: { collections: [] } });
+assert.equal(r.isError, true);
+console.log("ok: boolean + create_variables pass through");
 
 r = await client.callTool({ name: "figma_delete", arguments: { ids: ["1:3"] } });
 assert.equal(r.isError, true);

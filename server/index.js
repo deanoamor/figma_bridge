@@ -283,7 +283,8 @@ const wrap = (command, mapParams = (p) => p) => async (params) => {
 
 const NODE_SPEC_DOC = `
 Node spec (JSON object). Common fields:
-- type: FRAME | COMPONENT | RECTANGLE | ELLIPSE | TEXT | LINE | POLYGON | STAR | SVG  (default FRAME). COMPONENT is a frame that can be combined into variants with figma_combine_variants.
+- type: FRAME | COMPONENT | RECTANGLE | ELLIPSE | TEXT | LINE | POLYGON | STAR | VECTOR | SVG  (default FRAME). COMPONENT is a frame that can be combined into variants with figma_combine_variants.
+  VECTOR draws a path: {type:"VECTOR", path:"M 0 0 L 40 0 L 20 30 Z", fills?, strokes?, width?, height?} (or vectorPaths:[{data, windingRule:"NONZERO"|"EVENODD"}]). SVG path syntax: M L H V C S Q T Z, absolute or relative; arcs (A) are not supported, use an SVG node for those. width/height rescale the drawn path. With no fills and no strokes it gets a black fill. Combine shapes with figma_boolean.
   SVG imports vector artwork (e.g. an icon): {type:"SVG", svg:"<svg ...>...</svg>", name?, x?, y?, width?, height?}. It creates a frame containing editable vectors; use parentId on figma_create to drop it into a slot.
 - name, x, y, width, height, rotation, opacity (0-1), visible
 - fills: "#RRGGBB" | "#RRGGBBAA" | [{type:"SOLID",color:"#hex",opacity?}] | [{type:"GRADIENT_LINEAR",stops:[{position:0,color:"#hex"},...], direction|cssAngle|angle}] | "none"
@@ -314,6 +315,7 @@ Order: figma_create and figma_clone accept index (0 = first child) to insert at 
 Text: characters, fontSize, fontFamily (default "Inter"), fontStyle (default "Regular", e.g. "Bold", "Semi Bold"),
   textAlignHorizontal LEFT|CENTER|RIGHT|JUSTIFIED, textAlignVertical TOP|CENTER|BOTTOM, lineHeight (px number), letterSpacing (px number),
   textAutoResize "WIDTH_AND_HEIGHT"|"HEIGHT"|"NONE", textColor (shortcut for fills on TEXT).
+  Mixed styles in one text: runs:[{text:"Hemat ", fontStyle:"Regular"},{text:"30%", fontStyle:"Bold", color:"#E11D48", fontSize:28, textDecoration:"UNDERLINE", letterSpacing:0.5, lineHeight:32}] builds the text from the runs (characters is derived). Or style part of characters with ranges:[{start:0,end:5,fontStyle:"Bold",color:"#hex"}] (end exclusive). Per-run fields: fontSize, fontFamily, fontStyle, color, textDecoration NONE|UNDERLINE|STRIKETHROUGH, letterSpacing, lineHeight; unset fields keep the text's base style. figma_get_node returns runs when the styles differ.
 children: array of node specs (created recursively inside this node; frames only).
 Tip: build whole screens in ONE figma_create call using nested children instead of many tiny calls.`;
 
@@ -336,6 +338,65 @@ mcp.registerTool(
     inputSchema: { depth: z.number().int().min(0).max(6).optional().describe("Child levels to include (default 1)") },
   },
   wrap("get_selection")
+);
+
+mcp.registerTool(
+  "figma_boolean",
+  {
+    description:
+      "Combine shapes with a boolean operation (like Figma's Union / Subtract / Intersect / Exclude) into one new node. " +
+      "UNION merges all shapes; SUBTRACT cuts the shapes in front out of the shape at the back (stacking order decides, not the order of ids); " +
+      "INTERSECT keeps the overlap; EXCLUDE keeps everything except the overlap. Use flatten:true to turn the result into a single plain vector (a logo or icon that no longer needs its parts). " +
+      "Make the shapes with figma_create first (RECTANGLE, ELLIPSE, POLYGON, STAR or VECTOR with a path). Returns the new node.",
+    inputSchema: {
+      operation: z.enum(["UNION", "SUBTRACT", "INTERSECT", "EXCLUDE"]),
+      ids: z.array(z.string()).min(2).describe("Ids of the shapes to combine (at least 2)"),
+      name: z.string().optional().describe("Name of the result"),
+      parentId: z.string().optional().describe("Where to put the result (default: the parent of the first shape)"),
+      index: z.number().int().min(0).optional().describe("Position inside the parent (0 = first child)"),
+      flatten: z.boolean().optional().describe("Flatten the result into one vector (default false, which keeps the shapes editable)"),
+      props: z.record(z.any()).optional().describe("Properties to apply to the result, same as figma_update, e.g. {fills:'#111111', x:10, y:20}"),
+      select: z.boolean().optional().describe("Select the result (default true)"),
+    },
+  },
+  wrap("boolean")
+);
+
+mcp.registerTool(
+  "figma_create_variables",
+  {
+    description:
+      "Create or update local variables (design tokens) from a list: collections with modes, and variables with a value per mode. " +
+      "Safe to run again: collections and variables are matched by name and updated, never duplicated. " +
+      "Types: COLOR (\"#RRGGBB\" or \"#RRGGBBAA\"), FLOAT (number), STRING, BOOLEAN; type is inferred from the value when omitted. " +
+      "values is {modeName: value}, or a single value for the first mode. An alias to another variable is {alias:\"collection/name\"}; the target may be created in the same call. " +
+      "Names with slashes make groups, e.g. \"color/brand/primary\". Example: " +
+      '{collections:[{name:"core",modes:["Default"],variables:[{name:"blue/500",values:"#3B82F6"},{name:"radius/md",values:12}]},' +
+      '{name:"theme",modes:["Light","Dark"],variables:[{name:"primary",type:"COLOR",values:{Light:{alias:"core/blue/500"},Dark:"#60A5FA"},description:"Brand color"}]}]}. ' +
+      "Then use them in figma_create / figma_update as \"var:theme/primary\" or bind:{...} (see the node spec), and list them with figma_list_variables.",
+    inputSchema: {
+      collections: z
+        .array(
+          z.object({
+            name: z.string().min(1),
+            modes: z.array(z.string()).optional().describe("Mode names. A new collection's default mode is renamed to the first; missing modes are added; existing modes are kept."),
+            variables: z
+              .array(
+                z.object({
+                  name: z.string().min(1),
+                  type: z.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"]).optional(),
+                  values: z.any().optional().describe("{modeName: value | {alias:'collection/name'}} or one value for the first mode"),
+                  description: z.string().optional(),
+                  scopes: z.array(z.string()).optional().describe("Figma variable scopes, e.g. ['CORNER_RADIUS'] or ['ALL_FILLS']"),
+                })
+              )
+              .optional(),
+          })
+        )
+        .min(1),
+    },
+  },
+  wrap("create_variables")
 );
 
 mcp.registerTool(

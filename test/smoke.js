@@ -21,7 +21,7 @@ const tools = (await client.listTools()).tools.map((t) => t.name).sort();
 console.log("tools:", tools.join(", "));
 assert.deepEqual(tools, [
   "figma_boolean", "figma_clone", "figma_combine_variants", "figma_create", "figma_create_variables", "figma_delete", "figma_export", "figma_get_node",
-  "figma_get_selection", "figma_get_slots", "figma_list_children", "figma_list_variables", "figma_rebind_variables", "figma_select", "figma_set_slot", "figma_status", "figma_update",
+  "figma_get_selection", "figma_get_slots", "figma_import_html", "figma_list_children", "figma_list_variables", "figma_rebind_variables", "figma_select", "figma_set_slot", "figma_status", "figma_update",
 ]);
 
 // 1) no plugin connected -> clear error

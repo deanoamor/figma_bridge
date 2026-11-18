@@ -109,7 +109,11 @@ const figma = {
   },
   createLine: () => reg(new Node("LINE")), createPolygon: () => reg(new Node("POLYGON")), createStar: () => reg(new Node("STAR")),
   getNodeByIdAsync: async (id) => nodes.get(id) || null,
-  loadFontAsync: async (f) => { if (f.family === "Nope") throw new Error("x"); fontsLoaded.push(`${f.family} ${f.style}`); },
+  loadFontAsync: async (f) => {
+    // Poppins calls it "SemiBold", Inter "Semi Bold"; unknown families do not exist
+    if (f.family === "Nope" || f.family === "Missing Sans" || f.family === "Also Missing" || (f.family === "Poppins" && f.style === "Semi Bold") || (f.family === "Inter" && f.style === "SemiBold")) throw new Error("x");
+    fontsLoaded.push(`${f.family} ${f.style}`);
+  },
   base64Encode: (b) => Buffer.from(b).toString("base64"),
   base64Decode: (s) => new Uint8Array(Buffer.from(s, "base64")),
   createImage: (bytes) => {
@@ -848,6 +852,69 @@ console.log("ok: list_variables");
     assert.equal(r.ok, false, J(cols)); assert.match(r.error, re, J(cols));
   }
   console.log("ok: create_variables");
+}
+
+// ======================= phase 3: fonts and imported pages
+{
+  const J = (v) => JSON.stringify(v);
+  const make = (spec, params = {}) => call("create", { spec, animate: false, ...params });
+
+  // style names are matched across spellings
+  fontsLoaded.length = 0;
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Poppins", fontStyle: "Semi Bold" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(J(nodes.get(r.result.rootId).fontName), J({ family: "Poppins", style: "SemiBold" }));
+  assert.ok(fontsLoaded.includes("Poppins SemiBold"));
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Inter", fontStyle: "SemiBold" });
+  assert.equal(J(nodes.get(r.result.rootId).fontName), J({ family: "Inter", style: "Semi Bold" }));
+  r = await make({ type: "TEXT", runs: [{ text: "x" }, { text: "y", fontFamily: "Poppins", fontStyle: "Semi Bold" }] });
+  assert.equal(r.ok, true, r.error);
+  const rn = await call("get_node", { id: r.result.rootId, depth: 0 });
+  assert.equal(rn.result.runs[1].fontStyle, "SemiBold");
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Poppins", fontStyle: "Bold" });
+  assert.equal(nodes.get(r.result.rootId).fontName.style, "Bold");
+  console.log("ok: font style spelling (SemiBold / Semi Bold)");
+
+  // a missing font: error by default, substitution with fallbackFont
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Missing Sans" });
+  assert.equal(r.ok, false); assert.match(r.error, /Font "Missing Sans Regular" is not available/);
+  r = await make({ type: "FRAME", children: [
+    { type: "TEXT", characters: "a", fontFamily: "Missing Sans", fontStyle: "Bold" },
+    { type: "TEXT", characters: "b", fontFamily: "Missing Sans", fontStyle: "Bold" },
+    { type: "TEXT", runs: [{ text: "c" }, { text: "d", fontFamily: "Missing Sans", fontStyle: "Semi Bold" }] },
+  ] }, { fallbackFont: "Inter" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(J(r.result.fontSubstitutions), J(["Missing Sans Bold -> Inter Bold", "Missing Sans Semi Bold -> Inter Semi Bold"]));
+  const kids = nodes.get(r.result.rootId).children;
+  assert.equal(J(kids[0].fontName), J({ family: "Inter", style: "Bold" }));
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Missing Sans" });
+  assert.equal(r.ok, false, "the fallback does not stay on after the call");
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Missing Sans" }, { fallbackFont: "Also Missing" });
+  assert.equal(r.ok, false); assert.match(r.error, /not available/);
+  console.log("ok: fallbackFont");
+
+  // a spec produced by the HTML converter (snapshot of test/fixtures/sample-page.html) is accepted as is
+  const fixture = JSON.parse(fs.readFileSync("test/fixtures/sample-page.spec.json", "utf8"));
+  const count = (n) => 1 + (n.children || []).reduce((a, c) => a + count(c), 0);
+  r = await make(fixture, { fallbackFont: "Inter" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result.created.length, count(fixture));
+  const page = nodes.get(r.result.rootId);
+  assert.equal(page.width, 1440); assert.equal(page.layoutMode, "VERTICAL");
+  const walk = (n, f) => { f(n); (n.children || []).forEach((c) => walk(c, f)); };
+  const byName = (name) => { let hit; walk(page, (n) => { if (n.name === name && !hit) hit = n; }); return hit; };
+  const hero = byName("section.hero");
+  assert.equal(hero.layoutSizingHorizontal, "FILL");
+  const badge = byName("span.badge");
+  assert.equal(badge.layoutPositioning, "ABSOLUTE"); assert.ok(badge.x > 1000 && badge.y === 40, "absolute x/y landed inside an auto-layout parent");
+  const line = byName("border-bottom");
+  assert.equal(line.layoutPositioning, "ABSOLUTE"); assert.equal(line.height, 1);
+  assert.ok(byName("spacer"), "spacer frames are created");
+  assert.equal(byName("svg").svgSource.startsWith("<svg"), true);
+  let h1; walk(page, (n) => { if (n.type === "TEXT" && n.characters && n.characters.startsWith("Kelola")) h1 = n; });
+  const h1n = await call("get_node", { id: h1.id, depth: 0 });
+  assert.equal(h1n.result.runs.length, 3); assert.equal(h1n.result.runs[1].color, "#2563EB"); assert.equal(h1n.result.fontName.family, "Poppins");
+  console.log("ok: converter output is accepted by the plugin");
 }
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

@@ -171,15 +171,60 @@ function toEffect(e) {
 }
 
 var loadedFonts = {};
+var fontFallback = null;      // family to use when a font is missing (set per call by `fallbackFont`)
+var fontSubstitutions = [];
+
+// Style names differ per font family: Poppins has "SemiBold", Inter has "Semi Bold". Try the usual spellings.
+var WEIGHT_ALIASES = {
+  thin: ["Thin", "Hairline"], extralight: ["Extra Light", "ExtraLight", "Extralight", "Ultra Light", "UltraLight"],
+  light: ["Light"], regular: ["Regular", "Book", "Normal"], medium: ["Medium"],
+  semibold: ["Semi Bold", "SemiBold", "Semibold", "Demi Bold", "DemiBold"], bold: ["Bold"],
+  extrabold: ["Extra Bold", "ExtraBold", "Extrabold", "Ultra Bold", "UltraBold"], black: ["Black", "Heavy"],
+};
+function styleAlternatives(style) {
+  var out = [style];
+  var compact = String(style).toLowerCase().replace(/[\s_-]+/g, "");
+  var italic = /italic$/.test(compact);
+  var weight = compact.replace(/italic$/, "") || "regular";
+  var names = WEIGHT_ALIASES[weight] || [];
+  names.forEach(function (n) {
+    if (!italic) out.push(n);
+    else { out.push(n + " Italic"); if (weight === "regular") out.push("Italic"); }
+  });
+  if (italic && weight === "regular") out.push("Italic");
+  return out.filter(function (v, i) { return out.indexOf(v) === i; });
+}
+
+// Loads the font and returns the { family, style } that was actually available.
 async function ensureFont(family, style) {
   var key = family + "|" + style;
-  if (loadedFonts[key]) return;
-  try {
-    await figma.loadFontAsync({ family: family, style: style });
-  } catch (e) {
+  if (loadedFonts[key]) return loadedFonts[key];
+  var tryFamily = async function (fam) {
+    var styles = styleAlternatives(style);
+    for (var i = 0; i < styles.length; i++) {
+      try {
+        await figma.loadFontAsync({ family: fam, style: styles[i] });
+        return { family: fam, style: styles[i] };
+      } catch (e) { /* try the next spelling */ }
+    }
+    return null;
+  };
+  var found = await tryFamily(family);
+  if (!found && fontFallback && family !== fontFallback) {
+    found = await tryFamily(fontFallback); // same weight in the fallback family
+    if (!found) {
+      try { await figma.loadFontAsync({ family: fontFallback, style: "Regular" }); found = { family: fontFallback, style: "Regular" }; } catch (e) {}
+    }
+    if (found) {
+      var note = family + " " + style + " -> " + found.family + " " + found.style;
+      if (fontSubstitutions.indexOf(note) < 0) fontSubstitutions.push(note);
+    }
+  }
+  if (!found) {
     throw new Error('Font "' + family + " " + style + '" is not available. Try fontFamily "Inter" with fontStyle "Regular"/"Bold".');
   }
-  loadedFonts[key] = true;
+  loadedFonts[key] = found;
+  return found;
 }
 
 async function getParent(parentId) {
@@ -428,8 +473,8 @@ async function applyTextRanges(node, ranges) {
       var cur = node.getRangeFontName(a, b);
       var fam = r.fontFamily || (cur !== figma.mixed ? cur.family : node.fontName !== figma.mixed ? node.fontName.family : "Inter");
       var sty = r.fontStyle || (cur !== figma.mixed ? cur.style : "Regular");
-      await ensureFont(fam, sty);
-      node.setRangeFontName(a, b, { family: fam, style: sty });
+      var rf = await ensureFont(fam, sty);
+      node.setRangeFontName(a, b, { family: rf.family, style: rf.style });
     }
     if (r.fontSize !== undefined) node.setRangeFontSize(a, b, r.fontSize);
     if (r.color !== undefined) node.setRangeFills(a, b, await toPaintsAsync(r.color));
@@ -483,8 +528,8 @@ async function applyProps(node, spec, isCreate) {
         var fonts = node.getRangeAllFontNames(0, node.characters.length);
         for (var i = 0; i < fonts.length; i++) await ensureFont(fonts[i].family, fonts[i].style);
       }
-      await ensureFont(family, style);
-      node.fontName = { family: family, style: style };
+      var resolvedFont = await ensureFont(family, style);
+      node.fontName = { family: resolvedFont.family, style: resolvedFont.style };
     }
     if (has("characters")) node.characters = String(spec.characters);
     if (has("fontSize")) node.fontSize = spec.fontSize;
@@ -1034,10 +1079,13 @@ var handlers = {
     var animate = p.animate === undefined ? settings.animate : !!p.animate;
     var anim = animate ? [] : null;
     var root;
+    fontFallback = typeof p.fallbackFont === "string" && p.fallbackFont ? p.fallbackFont : null;
+    fontSubstitutions = [];
     try {
       root = await createNodeTree(p.spec, parent, created, anim);
       if (anim) await revealNodes(anim, p.speed || settings.speed, root, p.select !== false);
     } finally {
+      fontFallback = null;
       if (anim) restoreOpacity(anim); // never leave anything transparent, even on error
     }
     placeAt(parent, root, p.index); // insert at a position instead of the end of the parent
@@ -1045,7 +1093,9 @@ var handlers = {
       figma.currentPage.selection = [root];
       figma.viewport.scrollAndZoomIntoView([root]);
     }
-    return { rootId: root.id, created: created };
+    var out = { rootId: root.id, created: created };
+    if (fontSubstitutions.length) out.fontSubstitutions = fontSubstitutions.slice();
+    return out;
   },
 
   update: async function (p) {

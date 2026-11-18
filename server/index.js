@@ -340,6 +340,156 @@ mcp.registerTool(
   wrap("get_selection")
 );
 
+// ------------------------------------------------------------- HTML import
+// figma_import_html: the plugin window turns HTML+CSS into a node spec (it needs a browser DOM to
+// measure the page); this server reads local files, inlines CSS, loads images and creates the design.
+const MAX_HTML_BYTES = 3 * 1024 * 1024;
+const MAX_CSS_BYTES = 2 * 1024 * 1024;
+
+function withinDir(file, dir) {
+  const rel = path.relative(dir, file);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+// Replace <link rel="stylesheet" href="..."> by the stylesheet's text, so the plugin can see it.
+async function inlineStylesheets(html, baseDir, warnings) {
+  const links = [...html.matchAll(/<link\b[^>]*>/gi)].filter((m) => /rel\s*=\s*["']?stylesheet/i.test(m[0]));
+  for (const m of links) {
+    const hrefMatch = /href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(m[0]);
+    const href = hrefMatch && (hrefMatch[1] ?? hrefMatch[2] ?? hrefMatch[3]);
+    if (!href) continue;
+    try {
+      let css, cssDir = null;
+      if (/^https?:\/\//i.test(href)) {
+        const res = await fetch(href, { signal: AbortSignal.timeout(15000), redirect: "follow" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        css = await res.text();
+      } else if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^file:/i.test(href)) {
+        throw new Error("unsupported URL");
+      } else {
+        const file = path.resolve(baseDir, decodeURIComponent(href.replace(/^file:\/+/, "").replace(/[?#].*$/, "")));
+        if (!withinDir(file, baseDir)) throw new Error("outside the HTML folder");
+        const info = await stat(file);
+        if (info.size > MAX_CSS_BYTES) throw new Error("stylesheet is larger than 2 MB");
+        css = await readFile(file, "utf8");
+        cssDir = path.dirname(file);
+      }
+      if (css.length > MAX_CSS_BYTES) throw new Error("stylesheet is larger than 2 MB");
+      if (cssDir) {
+        // url(...) inside the CSS is relative to the CSS file; make it relative to the HTML folder
+        css = css.replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi, (all, q, u) => {
+          if (/^(data:|https?:|#|\/\/)/i.test(u)) return all;
+          const abs = path.resolve(cssDir, u);
+          return withinDir(abs, baseDir) ? `url("${path.relative(baseDir, abs).split(path.sep).join("/")}")` : all;
+        });
+      }
+      html = html.replace(m[0], () => `<style>/* ${href.replace(/\*\//g, "")} */\n${css.replace(/<\/style/gi, "<\\/style")}</style>`);
+    } catch (e) {
+      warnings.push(`Could not read stylesheet ${href}: ${e.message}`);
+    }
+  }
+  return html;
+}
+
+// Load every IMAGE fill of an imported spec. A picture that cannot be loaded becomes a grey placeholder
+// and a warning, so one missing file does not cancel the whole import.
+async function resolveImportImages(value, baseDir, warnings, cache = new Map()) {
+  if (Array.isArray(value)) {
+    const out = [];
+    for (const v of value) out.push(await resolveImportImages(v, baseDir, warnings, cache));
+    return out;
+  }
+  if (!value || typeof value !== "object") return value;
+  if (value.type === "IMAGE") {
+    let src = value.base64 ?? value.url ?? value.path;
+    try {
+      if (value.path !== undefined && !path.isAbsolute(src) && !/^[a-zA-Z]:[\\/]/.test(src)) {
+        if (!baseDir) throw new Error("it is a relative path and no baseDir was given");
+        const file = path.resolve(baseDir, src.replace(/^\/+/, ""));
+        if (!withinDir(file, baseDir)) throw new Error("it points outside the HTML folder");
+        src = file;
+      }
+      const key = String(src).slice(0, 200);
+      if (!cache.has(key)) cache.set(key, loadImage(String(src)));
+      const { url, path: _p, base64, ...rest } = value;
+      return { ...rest, base64: await cache.get(key) };
+    } catch (e) {
+      warnings.push(`Image skipped (grey placeholder): ${String(value.path ?? value.url ?? "inline data").slice(0, 80)}: ${e.message}`);
+      return "#E5E7EB";
+    }
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(value)) out[k] = await resolveImportImages(v, baseDir, warnings, cache);
+  return out;
+}
+
+mcp.registerTool(
+  "figma_import_html",
+  {
+    description:
+      "Turn an HTML page (with its CSS) into a Figma design: auto layout frames, text, colors, gradients, borders, radius, shadows, images and inline SVG. " +
+      "Use it to move a website or component from code into Figma. Give html (a string) or htmlPath (a file on this computer; its <link> stylesheets and relative images are loaded from the same folder). " +
+      "How it works: the page is rendered in the plugin window at `width` px and measured, so flexbox, grid and normal flow become auto layout when children stack in a row or a column (a grid becomes rows of a column); uneven margins become spacer frames; " +
+      "anything else is placed at absolute positions (layout:'absolute' does that for everything and matches the browser pixel for pixel but is not responsive). " +
+      "Text with mixed styles (<b>, <span style>, links) becomes one text with runs; button-like boxes become frames with padding around a text. " +
+      "It is an approximation: check the returned warnings (ignored ::before/::after, transforms, per-side borders, list bullets, fonts that are not installed...). " +
+      "Fonts: the font-family from CSS is used (Poppins, Inter...); a font Figma does not have falls back to fallbackFont (default Inter) and is reported in fontSubstitutions. " +
+      "Tip: for a long page import one section at a time with `selector` (e.g. '#pricing'), or use dryRun:true to look at the node spec first (then send edits with figma_create). " +
+      "The result is a normal Figma frame; use figma_get_node / figma_export to check it.",
+    inputSchema: {
+      html: z.string().optional().describe("HTML source. Use this or htmlPath."),
+      htmlPath: z.string().optional().describe("Path to an .html file on this computer, e.g. D:/proyek/index.html"),
+      css: z.string().optional().describe("Extra CSS to apply on top of the page"),
+      baseDir: z.string().optional().describe("Folder that relative image paths and stylesheets are resolved against (default: the folder of htmlPath)"),
+      width: z.number().min(100).max(4000).optional().describe("Page width in px (the browser viewport). Default 1440. Use 390 for a mobile layout."),
+      height: z.number().min(100).max(4000).optional().describe("Viewport height in px, used for vh units. Default 900."),
+      layout: z.enum(["auto", "absolute"]).optional().describe("auto (default): auto layout where possible. absolute: every box at its measured x/y."),
+      selector: z.string().optional().describe("CSS selector of the element to import (default: the page's single top-level element, or the whole body)"),
+      name: z.string().optional().describe("Name of the created frame"),
+      parentId: z.string().optional().describe("Parent node id. Default: current page."),
+      index: z.number().int().min(0).optional().describe("Position among the parent's children (0 = first)"),
+      fallbackFont: z.string().optional().describe("Font family used when a CSS font is not available in Figma. Default Inter; empty string = fail instead."),
+      dryRun: z.boolean().optional().describe("Only return the converted node spec and warnings; create nothing."),
+      animate: z.boolean().optional().describe("Build animation (default follows the plugin window; usually turn it off for big imports)"),
+      speed: z.enum(["fast", "normal", "slow"]).optional(),
+      select: z.boolean().optional().describe("Select and zoom to the new frame (default true)"),
+    },
+  },
+  async (params) => {
+    try {
+      if ((params.html === undefined) === (params.htmlPath === undefined)) throw new Error("Give exactly one of html or htmlPath");
+      let html = params.html;
+      let baseDir = params.baseDir ? path.resolve(params.baseDir) : undefined;
+      if (params.htmlPath !== undefined) {
+        const file = path.resolve(params.htmlPath);
+        let info;
+        try { info = await stat(file); } catch { throw new Error(`HTML file not found: ${params.htmlPath}`); }
+        if (!info.isFile()) throw new Error(`Not a file: ${params.htmlPath}`);
+        if (info.size > MAX_HTML_BYTES) throw new Error(`HTML file is too large (${Math.round(info.size / 1024)} KB, limit ${MAX_HTML_BYTES / 1048576} MB). Import a section with selector.`);
+        html = await readFile(file, "utf8");
+        baseDir = baseDir || path.dirname(file);
+      }
+      if (!html || !html.trim()) throw new Error("The HTML is empty");
+      if (html.length > MAX_HTML_BYTES) throw new Error(`The HTML is too large (limit ${MAX_HTML_BYTES / 1048576} MB). Import a section with selector.`);
+      const warnings = [];
+      if (baseDir) html = await inlineStylesheets(html, baseDir, warnings);
+      const conv = await callPlugin("html_to_spec", {
+        html, css: params.css, width: params.width, height: params.height, layout: params.layout, selector: params.selector, name: params.name,
+      });
+      warnings.push(...(conv.warnings || []));
+      const spec = await resolveImportImages(conv.spec, baseDir, warnings);
+      if (params.dryRun) return ok({ stats: conv.stats, warnings, spec });
+      const created = await callPlugin("create", {
+        spec, parentId: params.parentId, index: params.index, animate: params.animate, speed: params.speed, select: params.select,
+        fallbackFont: params.fallbackFont === undefined ? "Inter" : params.fallbackFont || undefined,
+      });
+      const out = { rootId: created.rootId, nodesCreated: created.created.length, stats: conv.stats, warnings };
+      if (created.fontSubstitutions) out.fontSubstitutions = created.fontSubstitutions;
+      return ok(out);
+    } catch (e) { return fail(e); }
+  }
+);
+
 mcp.registerTool(
   "figma_boolean",
   {

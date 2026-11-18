@@ -52,6 +52,833 @@
   <div id="log"></div>
   <div class="hint">Keep this window open while Claude is working. It reconnects automatically.</div>
 
+<script id="html2spec">
+// HTML + CSS -> figma_create spec. Runs in this UI window (it has a DOM; code.js does not).
+// The page is rendered in a hidden sandboxed iframe (no scripts run), measured with getBoundingClientRect
+// and read with getComputedStyle. Layout is derived from the measured boxes, so flexbox, grid and normal
+// block flow all become auto layout when they stack in a row or a column, and fall back to absolute
+// positions when they do not. The result is an approximation: see the warnings it returns.
+(function () {
+  "use strict";
+  var SKIP = { SCRIPT: 1, STYLE: 1, LINK: 1, META: 1, HEAD: 1, TITLE: 1, NOSCRIPT: 1, TEMPLATE: 1, BASE: 1, BR: 1, WBR: 1 };
+  var GENERIC_FONTS = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|ui-sans-serif|ui-serif|ui-monospace|ui-rounded|-apple-system|blinkmacsystemfont|emoji|math|fangsong)$/i;
+  var WEIGHT_NAMES = { 100: "Thin", 200: "Extra Light", 300: "Light", 400: "Regular", 500: "Medium", 600: "Semi Bold", 700: "Bold", 800: "Extra Bold", 900: "Black" };
+  var SENTINEL = "https://asset.invalid/";
+  var EPS = 0.75;
+
+  var r2 = function (n) { return Math.round(n * 100) / 100; };
+  var px = function (v) { var n = parseFloat(v); return isFinite(n) ? n : 0; };
+  var near = function (a, b, e) { return Math.abs(a - b) <= (e === undefined ? EPS : e); };
+
+  function splitTop(str, sep) {
+    var out = [], depth = 0, cur = "";
+    for (var i = 0; i < str.length; i++) {
+      var ch = str[i];
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      if (ch === sep && depth === 0) { out.push(cur.trim()); cur = ""; } else cur += ch;
+    }
+    if (cur.trim()) out.push(cur.trim());
+    return out;
+  }
+
+  var canvasCtx = null;
+  function parseColor(str) { // -> { r, g, b, a } (0-255, a 0-1) or null
+    if (!str) return null;
+    str = String(str).trim();
+    if (str === "transparent") return { r: 0, g: 0, b: 0, a: 0 };
+    var m = /^rgba?\(([^)]+)\)$/i.exec(str);
+    if (m) {
+      var p = m[1].split(/[\s,\/]+/).filter(Boolean).map(function (x) { return x.indexOf("%") >= 0 ? parseFloat(x) / 100 : parseFloat(x); });
+      if (p.length >= 3 && p.every(function (x) { return isFinite(x); })) {
+        return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+      }
+    }
+    try { // modern syntaxes (color(), oklch(), named colors...): let the browser convert
+      canvasCtx = canvasCtx || document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+      canvasCtx.canvas.width = canvasCtx.canvas.height = 1;
+      canvasCtx.clearRect(0, 0, 1, 1);
+      canvasCtx.fillStyle = "#000"; canvasCtx.fillStyle = str;
+      canvasCtx.fillRect(0, 0, 1, 1);
+      var d = canvasCtx.getImageData(0, 0, 1, 1).data;
+      return { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+    } catch (e) { return null; }
+  }
+  function hex(c) {
+    var h = function (v) { var s = Math.max(0, Math.min(255, Math.round(v))).toString(16); return s.length < 2 ? "0" + s : s; };
+    return ("#" + h(c.r) + h(c.g) + h(c.b) + (c.a < 1 ? h(c.a * 255) : "")).toUpperCase();
+  }
+  function colorHex(str) { var c = parseColor(str); return c && c.a > 0.001 ? hex(c) : null; }
+
+  async function htmlToSpec(html, opts) {
+    opts = opts || {};
+    var width = opts.width > 0 ? opts.width : 1440;
+    var height = opts.height > 0 ? opts.height : 900;
+    var absoluteMode = opts.layout === "absolute";
+    var warnings = [];
+    var warnOnce = function (m) { if (warnings.indexOf(m) < 0 && warnings.length < 40) warnings.push(m); };
+    var stats = { frames: 0, texts: 0, images: 0, vectors: 0, absoluteFallbacks: 0 };
+
+    // ---- 1. sanitize: nothing from the page may run or load
+    var doc = new DOMParser().parseFromString(String(html), "text/html");
+    doc.querySelectorAll("link").forEach(function (l) {
+      if (/stylesheet/i.test(l.getAttribute("rel") || "")) warnOnce("External stylesheet ignored (" + l.getAttribute("href") + "); put the CSS in <style> or pass it as css.");
+    });
+    doc.querySelectorAll("script,noscript,iframe,object,embed,frame,link,base,meta[http-equiv]").forEach(function (n) { n.remove(); });
+    doc.querySelectorAll("*").forEach(function (el) {
+      Array.prototype.slice.call(el.attributes).forEach(function (a) { if (/^on/i.test(a.name)) el.removeAttribute(a.name); });
+    });
+    doc.querySelectorAll("style").forEach(function (st) {
+      st.textContent = st.textContent.replace(/@import[^;]*;/gi, function () { warnOnce("@import ignored; put the CSS in <style> or pass it as css."); return ""; });
+    });
+    if (opts.css) { var extra = doc.createElement("style"); extra.textContent = String(opts.css).replace(/@import[^;]*;/gi, ""); doc.head.appendChild(extra); }
+    doc.querySelectorAll("img").forEach(function (img) {
+      var src = img.getAttribute("src") || "";
+      img.setAttribute("data-src", src);
+      if (!/^data:image\//i.test(src)) { img.removeAttribute("src"); img.removeAttribute("srcset"); } // only inline images load here
+    });
+    var baseEl = doc.createElement("base"); baseEl.setAttribute("href", SENTINEL); doc.head.insertBefore(baseEl, doc.head.firstChild);
+
+    // ---- 2. render in a hidden sandboxed iframe
+    var iframe = document.createElement("iframe");
+    iframe.setAttribute("sandbox", "allow-same-origin");
+    iframe.style.cssText = "position:fixed;left:-100000px;top:0;border:0;visibility:hidden;width:" + width + "px;height:" + height + "px";
+    document.body.appendChild(iframe);
+    try {
+      await new Promise(function (resolve, reject) {
+        iframe.onload = resolve; iframe.onerror = function () { reject(new Error("Could not render the HTML")); };
+        iframe.srcdoc = "<!doctype html>" + doc.documentElement.outerHTML;
+      });
+      var idoc = iframe.contentDocument, win = iframe.contentWindow;
+      try { await idoc.fonts.ready; } catch (e) {}
+      await Promise.all(Array.prototype.map.call(idoc.images, function (im) { return im.decode ? im.decode().catch(function () {}) : null; }));
+      return build();
+    } finally { iframe.remove(); }
+
+    function build() {
+      var cs = function (el, pseudo) { return win.getComputedStyle(el, pseudo || null); };
+      var rectOf = function (el) { var r = el.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; };
+      var rangeRect = function (node) {
+        var rg = idoc.createRange(); rg.selectNodeContents(node);
+        var r = rg.getBoundingClientRect();
+        return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+      };
+      var elName = function (el) {
+        return el.getAttribute("data-name") || (el.id ? "#" + el.id : "") ||
+          (el.classList && el.classList.length ? el.tagName.toLowerCase() + "." + el.classList[0] : el.tagName.toLowerCase());
+      };
+      var hidden = function (el) {
+        var s = cs(el);
+        return s.display === "none" || s.visibility === "hidden" || s.visibility === "collapse";
+      };
+      var isInlineEl = function (el) { return cs(el).display === "inline" && !{ IMG: 1, SVG: 1, svg: 1, INPUT: 1, BUTTON: 1, TEXTAREA: 1, SELECT: 1 }[el.tagName]; };
+      var hasText = function (el) {
+        for (var n = el.firstChild; n; n = n.nextSibling) if (n.nodeType === 3 && /\S/.test(n.data)) return true;
+        return false;
+      };
+      // only text and inline text elements inside: one text layer (with runs for the styles)
+      var isTextOnly = function (el) {
+        var any = false;
+        for (var n = el.firstChild; n; n = n.nextSibling) {
+          if (n.nodeType === 3) { if (/\S/.test(n.data)) any = true; continue; }
+          if (n.nodeType !== 1) continue;
+          if (n.tagName === "BR") { any = true; continue; }
+          if (SKIP[n.tagName] || hidden(n)) continue;
+          if (!isInlineEl(n) || cs(n).position === "absolute" || cs(n).position === "fixed" || !isTextOnly(n)) return false;
+          any = true;
+        }
+        return any;
+      };
+
+      // ---- text
+      var fontFamilyOf = function (s) {
+        var list = splitTop(s.fontFamily, ",");
+        for (var i = 0; i < list.length; i++) {
+          var f = list[i].replace(/^["']|["']$/g, "").trim();
+          if (f && !GENERIC_FONTS.test(f)) return f;
+        }
+        return "Inter";
+      };
+      var fontStyleOf = function (s) {
+        var w = parseInt(s.fontWeight, 10); if (!w) w = s.fontWeight === "bold" ? 700 : 400;
+        w = Math.min(900, Math.max(100, Math.round(w / 100) * 100));
+        var italic = s.fontStyle === "italic" || s.fontStyle === "oblique";
+        var name = WEIGHT_NAMES[w];
+        return italic ? (w === 400 ? "Italic" : name + " Italic") : name;
+      };
+      var decoOf = function (node, stop) {
+        for (var e = node.nodeType === 1 ? node : node.parentElement; e; e = e.parentElement) {
+          var line = cs(e).textDecorationLine || "";
+          if (/line-through/.test(line)) return "STRIKETHROUGH";
+          if (/underline/.test(line)) return "UNDERLINE";
+          if (e === stop) break;
+        }
+        return "NONE";
+      };
+      var styleOf = function (el, stop) {
+        var s = cs(el);
+        var lh = s.lineHeight === "normal" ? null : px(s.lineHeight);
+        return {
+          fontFamily: fontFamilyOf(s), fontStyle: fontStyleOf(s), fontSize: px(s.fontSize),
+          color: colorHex(s.color) || "#000000", letterSpacing: s.letterSpacing === "normal" ? 0 : px(s.letterSpacing),
+          lineHeight: lh, textDecoration: decoOf(el, stop), transform: s.textTransform, whiteSpace: s.whiteSpace,
+        };
+      };
+      var applyTransform = function (t, tr) {
+        if (tr === "uppercase") return t.toUpperCase();
+        if (tr === "lowercase") return t.toLowerCase();
+        if (tr === "capitalize") return t.replace(/(^|\s)(\S)/g, function (m, a, b) { return a + b.toUpperCase(); });
+        return t;
+      };
+      var collectRuns = function (root) {
+        var runs = [];
+        var walk = function (el) {
+          for (var n = el.firstChild; n; n = n.nextSibling) {
+            if (n.nodeType === 3) {
+              var st = styleOf(el, root);
+              var pre = /^(pre|pre-wrap|break-spaces)$/.test(st.whiteSpace);
+              var t = pre ? n.data : n.data.replace(/[ \t\r\n\f]+/g, " ");
+              if (st.whiteSpace === "pre-line") t = n.data.replace(/[ \t\f]+/g, " ").replace(/ ?\n ?/g, "\n");
+              t = applyTransform(t, st.transform);
+              if (t) runs.push({ text: t, style: st });
+            } else if (n.nodeType === 1 && n.tagName === "BR") {
+              runs.push({ text: "\n", style: styleOf(el, root) });
+            } else if (n.nodeType === 1 && !SKIP[n.tagName] && !hidden(n)) walk(n);
+          }
+        };
+        walk(root);
+        // trim the edges of the block and collapse the space between runs
+        if (runs.length && !/^(pre|pre-wrap|break-spaces)$/.test(runs[0].style.whiteSpace)) runs[0].text = runs[0].text.replace(/^ +/, "");
+        var last = runs[runs.length - 1];
+        if (last && !/^(pre|pre-wrap|break-spaces)$/.test(last.style.whiteSpace)) last.text = last.text.replace(/ +$/, "");
+        for (var i = 1; i < runs.length; i++) if (/ $/.test(runs[i - 1].text) && /^ /.test(runs[i].text)) runs[i].text = runs[i].text.slice(1);
+        runs = runs.filter(function (r) { return r.text.length; });
+        var merged = [];
+        runs.forEach(function (r) {
+          var prev = merged[merged.length - 1];
+          if (prev && JSON.stringify(prev.style) === JSON.stringify(r.style)) prev.text += r.text; else merged.push({ text: r.text, style: r.style });
+        });
+        return merged;
+      };
+      var alignOf = function (s) { var a = s.textAlign; return a === "center" ? "CENTER" : a === "right" || a === "end" ? "RIGHT" : a === "justify" ? "JUSTIFIED" : "LEFT"; };
+
+      // `runsOrNode`: an element whose text to read; textRect: where the text sits
+      var textSpec = function (el, textRect, boxed) {
+        var runs = collectRuns(el);
+        if (!runs.length) return null;
+        var s = cs(el), base = styleOf(el, el); // runs only list what differs from the element's own style
+        var chars = runs.map(function (r) { return r.text; }).join("");
+        var spec = { type: "TEXT", fontFamily: base.fontFamily, fontStyle: base.fontStyle, fontSize: base.fontSize, textColor: base.color };
+        if (base.lineHeight) spec.lineHeight = r2(base.lineHeight);
+        if (base.letterSpacing) spec.letterSpacing = r2(base.letterSpacing);
+        var differs = runs.some(function (r) {
+          var x = r.style;
+          return x.fontFamily !== base.fontFamily || x.fontStyle !== base.fontStyle || x.fontSize !== base.fontSize || x.color !== base.color ||
+            x.letterSpacing !== base.letterSpacing || x.lineHeight !== base.lineHeight || x.textDecoration !== "NONE";
+        });
+        if (differs) {
+          spec.runs = runs.map(function (r) {
+            var x = r.style, o = { text: r.text };
+            if (x.fontFamily !== base.fontFamily) o.fontFamily = x.fontFamily;
+            if (x.fontStyle !== base.fontStyle) o.fontStyle = x.fontStyle;
+            if (x.fontSize !== base.fontSize) o.fontSize = x.fontSize;
+            if (x.color !== base.color) o.color = x.color;
+            if (x.letterSpacing !== base.letterSpacing) o.letterSpacing = r2(x.letterSpacing);
+            if (x.lineHeight !== base.lineHeight && x.lineHeight) o.lineHeight = r2(x.lineHeight);
+            if (x.textDecoration !== "NONE") o.textDecoration = x.textDecoration;
+            return o;
+          });
+        } else spec.characters = chars;
+        var align = alignOf(s); spec.textAlignHorizontal = align;
+        var lh = base.lineHeight || base.fontSize * 1.2;
+        var multiline = textRect.height > lh * 1.5 || chars.indexOf("\n") >= 0;
+        stats.texts++;
+        spec.__text = { multiline: multiline || (!boxed && align !== "LEFT"), width: textRect.width };
+        return spec;
+      };
+
+      // ---- box styles
+      var parseShadows = function (v) {
+        if (!v || v === "none") return [];
+        return splitTop(v, ",").map(function (part) {
+          var inset = /\binset\b/.test(part); part = part.replace(/\binset\b/, "");
+          var cm = /(rgba?\([^)]*\)|color\([^)]*\)|hsla?\([^)]*\)|#[0-9a-f]{3,8})/i.exec(part);
+          var c = cm ? parseColor(cm[1]) : { r: 0, g: 0, b: 0, a: 1 };
+          var nums = (cm ? part.replace(cm[1], "") : part).match(/-?[\d.]+(?:px)?/g) || [];
+          var n = nums.map(parseFloat);
+          if (!c || c.a <= 0.001 || n.length < 2) return null;
+          return { type: inset ? "INNER_SHADOW" : "DROP_SHADOW", color: hex({ r: c.r, g: c.g, b: c.b, a: 1 }), opacity: r2(c.a), x: n[0], y: n[1], blur: n[2] || 0, spread: n[3] || 0 };
+        }).filter(Boolean);
+      };
+      var imageSource = function (u) {
+        if (/^data:/i.test(u)) return { base64: u };
+        if (/^https?:\/\//i.test(u) && u.indexOf(SENTINEL) !== 0) return { url: u };
+        var path = u.indexOf(SENTINEL) === 0 ? u.slice(SENTINEL.length) : u;
+        path = path.replace(/^file:\/+/, "").replace(/[?#].*$/, "");
+        try { path = decodeURIComponent(path); } catch (e) {}
+        return { path: path };
+      };
+      var parseGradient = function (v) {
+        var m = /^(repeating-)?(linear|radial|conic)-gradient\(([\s\S]*)\)$/i.exec(v.trim());
+        if (!m) return null;
+        if (m[1]) warnOnce("repeating gradients are approximated by a single gradient");
+        if (m[2].toLowerCase() === "conic") { warnOnce("conic-gradient is not supported; skipped"); return null; }
+        var args = splitTop(m[3], ","), paint = { type: m[2].toLowerCase() === "linear" ? "GRADIENT_LINEAR" : "GRADIENT_RADIAL" };
+        var first = args[0] || "";
+        if (paint.type === "GRADIENT_LINEAR") {
+          if (/^to\s/i.test(first)) { paint.direction = first.toLowerCase(); args.shift(); }
+          else if (/^-?[\d.]+(deg|turn|rad|grad)$/i.test(first)) {
+            var num = parseFloat(first), unit = /[a-z]+$/i.exec(first)[0].toLowerCase();
+            paint.cssAngle = unit === "turn" ? num * 360 : unit === "rad" ? num * 180 / Math.PI : unit === "grad" ? num * 0.9 : num;
+            paint.cssAngle = r2(((paint.cssAngle % 360) + 360) % 360); args.shift();
+          } else paint.cssAngle = 180;
+        } else if (/^(circle|ellipse|closest|farthest|at\s)/i.test(first)) {
+          args.shift(); warnOnce("radial gradients are approximated (centered, full size)");
+        }
+        var stops = args.map(function (a) {
+          var pm = /\s+(-?[\d.]+(?:%|px))(?:\s+(-?[\d.]+(?:%|px)))?$/.exec(a);
+          var colorStr = pm ? a.slice(0, pm.index) : a;
+          var pos = null;
+          if (pm) { if (/%$/.test(pm[1])) pos = parseFloat(pm[1]) / 100; else warnOnce("gradient stops in px are spread evenly"); }
+          var c = parseColor(colorStr);
+          return { color: c ? hex(c.a === 0 ? { r: c.r, g: c.g, b: c.b, a: 0 } : c) : "#000000", position: pos };
+        });
+        if (stops.length < 2) return null;
+        if (stops[0].position === null) stops[0].position = 0;
+        if (stops[stops.length - 1].position === null) stops[stops.length - 1].position = 1;
+        for (var i = 1; i < stops.length - 1; i++) {
+          if (stops[i].position !== null) continue;
+          var j = i; while (stops[j].position === null) j++;
+          var a0 = stops[i - 1].position, a1 = stops[j].position;
+          for (var k = i; k < j; k++) stops[k].position = a0 + (a1 - a0) * (k - i + 1) / (j - i + 1);
+        }
+        paint.stops = stops.map(function (x) { return { position: Math.max(0, Math.min(1, r2(x.position))), color: x.color }; });
+        return paint;
+      };
+      var fillsOf = function (s, el) {
+        var fills = [], bg = parseColor(s.backgroundColor);
+        if (bg && bg.a > 0.001) fills.push(hex(bg));
+        if (s.backgroundImage && s.backgroundImage !== "none") {
+          var layers = splitTop(s.backgroundImage, ",").reverse(); // CSS lists the top layer first
+          var sizes = splitTop(s.backgroundSize || "", ",").reverse();
+          layers.forEach(function (layer, i) {
+            var um = /^url\(["']?([^"')]+)["']?\)$/i.exec(layer);
+            if (um) {
+              var size = sizes[i] || sizes[0] || "auto";
+              var paint = Object.assign({ type: "IMAGE", scaleMode: size === "contain" ? "FIT" : s.backgroundRepeat && /^repeat/.test(s.backgroundRepeat) && size === "auto" ? "TILE" : "FILL" }, imageSource(um[1]));
+              fills.push(paint); stats.images++;
+            } else { var g = parseGradient(layer); if (g) fills.push(g); }
+          });
+        }
+        return fills;
+      };
+      var radiiOf = function (s, w, h) {
+        var one = function (v) {
+          var first = String(v).split(/\s+/)[0];
+          return /%$/.test(first) ? parseFloat(first) / 100 * Math.min(w, h) : px(first);
+        };
+        var cap = Math.min(w, h) / 2;
+        return ["borderTopLeftRadius", "borderTopRightRadius", "borderBottomRightRadius", "borderBottomLeftRadius"].map(function (k) { return Math.min(r2(one(s[k])), cap); });
+      };
+      var boxProps = function (spec, el, s, rect) {
+        var props = spec;
+        var fills = fillsOf(s, el);
+        if (fills.length) props.fills = fills;
+        // border
+        var bs = ["Top", "Right", "Bottom", "Left"].map(function (side) {
+          var w = px(s["border" + side + "Width"]), st = s["border" + side + "Style"];
+          return { w: st === "none" || st === "hidden" ? 0 : w, color: colorHex(s["border" + side + "Color"]), style: st, side: side };
+        });
+        var vis = bs.filter(function (b) { return b.w > 0 && b.color; });
+        var extraChildren = [];
+        if (vis.length === 4 && vis.every(function (b) { return near(b.w, vis[0].w, 0.01) && b.color === vis[0].color; })) {
+          props.strokes = [vis[0].color]; props.strokeWeight = vis[0].w; props.strokeAlign = "INSIDE";
+          if (vis[0].style === "dashed" || vis[0].style === "dotted") warnOnce("dashed/dotted borders are drawn solid");
+        } else if (vis.length === 1) {
+          var b1 = vis[0], bw = b1.w, vertical = b1.side === "Left" || b1.side === "Right";
+          var line = { type: "RECTANGLE", name: "border-" + b1.side.toLowerCase(), fills: [b1.color], __border: b1.side };
+          if (vertical) { line.width = bw; line.height = rect.height; line.x = b1.side === "Left" ? 0 : rect.width - bw; line.y = 0; }
+          else { line.width = rect.width; line.height = bw; line.x = 0; line.y = b1.side === "Top" ? 0 : rect.height - bw; }
+          extraChildren.push(line);
+        } else if (vis.length > 1) {
+          var mx = vis.reduce(function (a, b) { return a.w >= b.w ? a : b; });
+          props.strokes = [mx.color]; props.strokeWeight = mx.w; props.strokeAlign = "INSIDE";
+          warnOnce("borders that differ per side are drawn as one uniform border");
+        }
+        var rad = radiiOf(s, rect.width, rect.height);
+        if (rad.every(function (r) { return r === rad[0]; })) { if (rad[0] > 0) props.cornerRadius = rad[0]; }
+        else { props.topLeftRadius = rad[0]; props.topRightRadius = rad[1]; props.bottomRightRadius = rad[2]; props.bottomLeftRadius = rad[3]; }
+        var effects = parseShadows(s.boxShadow);
+        var fm = /blur\(([\d.]+)px\)/.exec(s.filter || "");
+        if (fm) effects.push({ type: "LAYER_BLUR", blur: r2(parseFloat(fm[1]) * 2) });
+        if (s.backdropFilter && s.backdropFilter !== "none") warnOnce("backdrop-filter is not imported");
+        if (effects.length) props.effects = effects;
+        var op = parseFloat(s.opacity); if (isFinite(op) && op < 1) props.opacity = r2(op);
+        if (s.transform && s.transform !== "none") warnOnce("CSS transforms are ignored (positions use the final box)");
+        props.clipsContent = /^(hidden|clip|auto|scroll)$/.test(s.overflowX) || /^(hidden|clip|auto|scroll)$/.test(s.overflowY);
+        return extraChildren;
+      };
+      var hasVisuals = function (s) {
+        var bg = parseColor(s.backgroundColor);
+        if (bg && bg.a > 0.001) return true;
+        if (s.backgroundImage && s.backgroundImage !== "none") return true;
+        if (s.boxShadow && s.boxShadow !== "none") return true;
+        return ["Top", "Right", "Bottom", "Left"].some(function (side) { return px(s["border" + side + "Width"]) > 0 && s["border" + side + "Style"] !== "none"; });
+      };
+      var padOf = function (s) { return { t: px(s.paddingTop), r: px(s.paddingRight), b: px(s.paddingBottom), l: px(s.paddingLeft) }; };
+      var borderOf = function (s) {
+        var w = function (side) { return s["border" + side + "Style"] === "none" ? 0 : px(s["border" + side + "Width"]); };
+        return { t: w("Top"), r: w("Right"), b: w("Bottom"), l: w("Left") };
+      };
+      var isBoxed = function (s) { var p = padOf(s); return hasVisuals(s) || p.t + p.r + p.b + p.l > 0; };
+
+      // ---- layout classification from measured boxes
+      var gapsOf = function (items, axis) {
+        var g = [];
+        for (var i = 1; i < items.length; i++) {
+          g.push(axis === "y" ? items[i].rect.top - items[i - 1].rect.bottom : items[i].rect.left - items[i - 1].rect.right);
+        }
+        return g;
+      };
+      var uniform = function (arr) { return arr.every(function (v) { return near(v, arr[0]); }); };
+      var byTop = function (a, b) { return a.rect.top - b.rect.top || a.rect.left - b.rect.left; };
+      var byLeft = function (a, b) { return a.rect.left - b.rect.left || a.rect.top - b.rect.top; };
+
+      // Works out auto layout props for `items` placed inside `box` ({x,y,w,h}). Returns null when the
+      // items cannot be expressed as a row or a column (the caller then positions them absolutely).
+      var layoutOf = function (items, box, kind, cssGap, crossEnd) {
+        var horizontal = kind === "H";
+        var axis = horizontal ? "x" : "y";
+        var sorted = items.slice().sort(horizontal ? byLeft : byTop);
+        var gaps = gapsOf(sorted, axis);
+        var start = horizontal ? box.x : box.y, end = horizontal ? box.x + box.w : box.y + box.h;
+        var first = sorted[0].rect, last = sorted[sorted.length - 1].rect;
+        var startOff = (horizontal ? first.left : first.top) - start, endOff = end - (horizontal ? last.right : last.bottom);
+        var res = { kind: kind, items: sorted, spacing: 0, primary: "MIN", counter: "MIN", extraStart: 0, spacers: [] };
+        if (gaps.some(function (g) { return g < -EPS; })) return null; // overlapping items
+        var evenGaps = !gaps.length || uniform(gaps);
+        if (gaps.length) {
+          // Auto layout has one gap for all children. CSS margins make some gaps bigger: use the smallest
+          // gap and add an empty spacer frame where a gap is larger.
+          var minGap = Math.max(0, Math.min.apply(null, gaps));
+          res.spacing = r2(minGap);
+          res.spacers = gaps.map(function (g) { return g - minGap > EPS ? r2(g - minGap) : 0; });
+        }
+        if (near(startOff, 0, 1.5) || startOff <= EPS) {
+          if (evenGaps && gaps.length >= 1 && near(endOff, 0, 1.5) && cssGap !== null && !near(gaps[0], cssGap, 1)) { res.primary = "SPACE_BETWEEN"; res.spacing = cssGap; res.spaceBetween = true; res.spacers = gaps.map(function () { return 0; }); }
+          else res.primary = "MIN";
+        } else if (near(startOff, endOff, 1.5)) res.primary = "CENTER";
+        else if (near(endOff, 0, 1.5)) res.primary = "MAX";
+        else { res.primary = "MIN"; res.extraStart = r2(startOff); }
+        // cross axis
+        var cs0 = horizontal ? box.y : box.x, ce0 = horizontal ? box.y + box.h : box.x + box.w, mid = (cs0 + ce0) / 2;
+        var lo = function (it) { return horizontal ? it.rect.top : it.rect.left; };
+        var hi = function (it) { return horizontal ? it.rect.bottom : it.rect.right; };
+        var all = function (f) { return sorted.every(f); };
+        if (all(function (it) { return near(lo(it), cs0, 1.5); })) res.counter = "MIN";
+        else if (all(function (it) { return near((lo(it) + hi(it)) / 2, mid, 1.5); })) res.counter = "CENTER";
+        else if (crossEnd && all(function (it) { return near(hi(it), ce0, 1.5); })) res.counter = "MAX";
+        else if (sorted.length === 1) { res.counter = "MIN"; res.extraCounter = r2(lo(sorted[0]) - cs0); }
+        else if (all(function (it) { return lo(it) >= cs0 - EPS; })) {
+          // left-aligned, but some children are pushed in (margin): they get a padded wrapper frame
+          res.counter = "MIN";
+          res.offsets = sorted.map(function (it) { var o = lo(it) - cs0; return o > EPS ? r2(o) : 0; });
+        } else if (all(function (it) { return near(hi(it), ce0, 1.5); })) res.counter = "MAX";
+        else return null;
+        return res;
+      };
+
+      var classify = function (flow, box, s) {
+        if (!flow.length) return { kind: "NONE" };
+        var display = s.display, cssRow = s.rowGap === "normal" ? 0 : px(s.rowGap), cssCol = s.columnGap === "normal" ? 0 : px(s.columnGap);
+        var isFlex = /flex/.test(display), isGrid = /grid/.test(display);
+        var crossEnd = (isFlex || isGrid) && /(^|-)end$/.test(s.alignItems || "");
+        var dirHint = isFlex && /^row/.test(s.flexDirection) ? "H" : "V";
+        if (flow.length === 1) {
+          var one = layoutOf(flow, box, dirHint, null, crossEnd);
+          return one ? { kind: dirHint, layout: one, isFlex: isFlex, isGrid: isGrid } : { kind: "NONE" };
+        }
+        var sortedT = flow.slice().sort(byTop), column = true;
+        for (var i = 1; i < sortedT.length; i++) if (sortedT[i].rect.top < sortedT[i - 1].rect.bottom - EPS) column = false;
+        if (column) {
+          var lv = layoutOf(flow, box, "V", isFlex || isGrid ? (/^column/.test(s.flexDirection) || isGrid ? cssRow : null) : null, crossEnd);
+          if (lv) return { kind: "V", layout: lv, isFlex: isFlex, isGrid: isGrid };
+        }
+        var sortedL = flow.slice().sort(byLeft), row = true;
+        for (var j = 1; j < sortedL.length; j++) if (sortedL[j].rect.left < sortedL[j - 1].rect.right - EPS) row = false;
+        if (row) {
+          var lh = layoutOf(flow, box, "H", isFlex || isGrid ? cssCol : null, crossEnd);
+          if (lh) return { kind: "H", layout: lh, isFlex: isFlex, isGrid: isGrid };
+        }
+        // grid-like: group into rows
+        var rows = [], cur = null;
+        sortedT.forEach(function (it) {
+          if (cur && it.rect.top < cur.bottom - EPS) { cur.items.push(it); cur.bottom = Math.max(cur.bottom, it.rect.bottom); cur.top = Math.min(cur.top, it.rect.top); }
+          else { cur = { items: [it], top: it.rect.top, bottom: it.rect.bottom }; rows.push(cur); }
+        });
+        if (rows.length >= 2 && rows.some(function (r) { return r.items.length >= 2; })) {
+          var rowLayouts = rows.map(function (r) {
+            return layoutOf(r.items, { x: box.x, y: r.top, w: box.w, h: r.bottom - r.top }, "H", isFlex || isGrid ? cssCol : null, crossEnd);
+          });
+          var rowGaps = [];
+          for (var k = 1; k < rows.length; k++) rowGaps.push(rows[k].top - rows[k - 1].bottom);
+          if (rowLayouts.every(Boolean) && !rowGaps.some(function (g) { return g < -EPS; })) {
+            var minRow = rowGaps.length ? Math.max(0, Math.min.apply(null, rowGaps)) : 0;
+            return {
+              kind: "GRID", rows: rows, rowLayouts: rowLayouts, rowGap: r2(minRow), isFlex: isFlex, isGrid: isGrid,
+              rowSpacers: rowGaps.map(function (g) { return g - minRow > EPS ? r2(g - minRow) : 0; }),
+            };
+          }
+        }
+        return { kind: "NONE", failed: true };
+      };
+
+      // flex items only stretch across the container when align-items is stretch/normal
+      var stretchOf = function (s) { return !(/flex/.test(s.display) && s.alignItems && !/^(stretch|normal)$/.test(s.alignItems)); };
+      var spacerSpec = function (horizontal, size) {
+        var sp = { type: "FRAME", name: "spacer", width: horizontal ? size : 1, height: horizontal ? 1 : size, layoutSizingHorizontal: "FIXED", layoutSizingVertical: "FIXED" };
+        stats.frames++;
+        return sp;
+      };
+
+      // A child that sits further in than its siblings (a margin) gets a wrapper frame whose padding is that margin.
+      var marginWrapper = function (child, off, horizontalParent) {
+        var w = {
+          type: "FRAME", name: "margin", layoutMode: horizontalParent ? "VERTICAL" : "HORIZONTAL", itemSpacing: 0,
+          primaryAxisAlignItems: "MIN", counterAxisAlignItems: "MIN", clipsContent: false,
+          paddingTop: horizontalParent ? off : 0, paddingRight: 0, paddingBottom: 0, paddingLeft: horizontalParent ? 0 : off,
+          children: [child],
+          layoutSizingHorizontal: child.layoutSizingHorizontal === "FILL" ? "FILL" : "HUG",
+          layoutSizingVertical: child.layoutSizingVertical === "FILL" ? "FILL" : "HUG",
+        };
+        stats.frames++;
+        return w;
+      };
+
+      // ---- sizing
+      // hug: expected size when the box hugs its content (null: cannot hug). ctx: how the parent lays out.
+      var sizeAxis = function (axis, size, hug, ctx, grow, inline) {
+        var auto = ctx.kind === "H" || ctx.kind === "V";
+        var hugs = hug !== null && near(size, hug, 1);
+        if (ctx.kind === "ROOT") return axis === "y" && hugs ? "HUG" : "FIXED"; // the page is as wide as the viewport
+        if (!auto) return "FIXED";
+        var main = (ctx.kind === "H") === (axis === "x");
+        if (main) {
+          if (grow > 0 || ctx.fillMain) return "FILL";
+          return hugs ? "HUG" : "FIXED";
+        }
+        // across the container: block-level boxes stretch to its width (FILL), unless they shrink to fit
+        var avail = axis === "x" ? ctx.box.w : ctx.box.h;
+        var fills = !inline && ctx.stretch !== false && avail > 0 && near(size, avail, EPS);
+        if (axis === "x") return fills ? "FILL" : hugs ? "HUG" : "FIXED";
+        // heights come from the content first; a box is only "stretched" (FILL) when it is taller than its content
+        return hugs ? "HUG" : fills && hug !== null && size > hug + 1 ? "FILL" : "FIXED";
+      };
+      var applySizing = function (spec, rect, hugW, hugH, ctx, grow, isText, inline) {
+        var sx = sizeAxis("x", rect.width, hugW, ctx, grow, inline), sy = sizeAxis("y", rect.height, hugH, ctx, 0, inline);
+        var auto = ctx.kind === "H" || ctx.kind === "V";
+        if (isText) {
+          var t = spec.__text;
+          if (!t.multiline) { sx = auto && sx === "FILL" ? "FILL" : "HUG"; spec.textAutoResize = "WIDTH_AND_HEIGHT"; }
+          else { spec.textAutoResize = "HEIGHT"; if (sx === "HUG") sx = "FIXED"; }
+          if (sx === "FILL") spec.textAutoResize = "HEIGHT"; // a text that fills its parent wraps
+          sy = "HUG";
+          delete spec.__text;
+        }
+        if (sx === "FIXED") spec.width = r2(rect.width);
+        if (sy === "FIXED") spec.height = r2(rect.height);
+        if (auto) { spec.layoutSizingHorizontal = sx; spec.layoutSizingVertical = sy; }
+        else if (spec.layoutMode && !isText) { // a page or a frame inside absolute positioning
+          if (sx === "HUG") spec.layoutSizingHorizontal = "HUG";
+          if (sy === "HUG") spec.layoutSizingVertical = "HUG";
+        }
+        return { sx: sx, sy: sy };
+      };
+
+      // ---- items
+      var collectItems = function (el) {
+        var items = [];
+        for (var n = el.firstChild; n; n = n.nextSibling) {
+          if (n.nodeType === 3) {
+            if (!/\S/.test(n.data)) continue;
+            var tr = rangeRect(n);
+            if (tr.width < 0.5 && tr.height < 0.5) continue;
+            items.push({ text: n, rect: tr, abs: false });
+          } else if (n.nodeType === 1) {
+            if (SKIP[n.tagName] || hidden(n)) continue;
+            var s = cs(n);
+            if (s.display === "contents") { warnOnce("display: contents is not supported; the element was skipped"); continue; }
+            var rect = rectOf(n);
+            var pos = s.position;
+            var abs = pos === "absolute" || pos === "fixed";
+            if (rect.width < 0.5 && rect.height < 0.5 && !(n.tagName === "SVG" || n.tagName === "svg")) continue;
+            items.push({ el: n, rect: rect, abs: abs });
+          }
+        }
+        return items;
+      };
+
+      // build one item into a spec; ctx = parent layout info
+      var buildItem = function (item, ctx, parentEl) {
+        if (item.text) return buildAnonymousText(item, ctx, parentEl);
+        return buildElement(item.el, item.rect, ctx);
+      };
+
+      var buildAnonymousText = function (item, ctx, parentEl) {
+        var st = styleOf(parentEl, parentEl);
+        var t = applyTransform(item.text.data.replace(/[ \t\r\n\f]+/g, " ").trim(), st.transform);
+        if (!t) return null;
+        var spec = { type: "TEXT", characters: t, fontFamily: st.fontFamily, fontStyle: st.fontStyle, fontSize: st.fontSize, textColor: st.color, textAlignHorizontal: alignOf(cs(parentEl)) };
+        if (st.lineHeight) spec.lineHeight = r2(st.lineHeight);
+        if (st.letterSpacing) spec.letterSpacing = r2(st.letterSpacing);
+        var lh = st.lineHeight || st.fontSize * 1.2;
+        stats.texts++;
+        spec.__text = { multiline: item.rect.height > lh * 1.5, width: item.rect.width };
+        applySizing(spec, item.rect, null, null, ctx, 0, true);
+        return spec;
+      };
+
+      var buildElement = function (el, rect, ctx) {
+        var s = cs(el), tag = el.tagName;
+        var grow = ctx && (ctx.kind === "H" || ctx.kind === "V") && /flex/.test(ctx.parentDisplay || "") ? parseFloat(s.flexGrow) || 0 : 0;
+        var isRoot = ctx.kind === "ROOT";
+        if (tag === "IMG") return buildImage(el, rect, ctx, s, grow);
+        if (tag === "svg" || tag === "SVG") return buildSvg(el, rect, ctx, s);
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return buildField(el, rect, ctx, s, grow);
+        if (isTextOnly(el)) {
+          if (!isBoxed(s) && !isRoot) {
+            var ts = textSpec(el, rect);
+            if (!ts) return null;
+            applySizing(ts, rect, null, null, ctx, grow, true, /^inline/.test(s.display));
+            return ts;
+          }
+          return buildTextBox(el, rect, ctx, s, grow);
+        }
+        return buildContainer(el, rect, ctx, s, grow);
+      };
+
+      // a box (button, badge, pill) whose only content is text: a frame with padding around a text layer
+      var buildTextBox = function (el, rect, ctx, s, grow) {
+        var pad = padOf(s), bd = borderOf(s);
+        var tr = rangeRect(el);
+        var spec = { type: "FRAME", name: elName(el), layoutMode: "HORIZONTAL" };
+        stats.frames++;
+        var boxExtra = boxProps(spec, el, s, rect);
+        var contentBox = { x: rect.left + bd.l + pad.l, y: rect.top + bd.t + pad.t, w: rect.width - bd.l - bd.r - pad.l - pad.r, h: rect.height - bd.t - bd.b - pad.t - pad.b };
+        spec.paddingTop = r2(pad.t + bd.t); spec.paddingRight = r2(pad.r + bd.r); spec.paddingBottom = r2(pad.b + bd.b); spec.paddingLeft = r2(pad.l + bd.l);
+        var align = alignOf(s);
+        spec.primaryAxisAlignItems = align === "CENTER" ? "CENTER" : align === "RIGHT" ? "MAX" : "MIN";
+        spec.counterAxisAlignItems = "CENTER";
+        var tctx = { kind: "H", box: contentBox, n: 1, fillMain: false, stretch: true };
+        var ts = textSpec(el, tr, true);
+        if (!ts) { delete spec.layoutMode; return finishFrame(spec, rect, ctx, null, null, grow, boxExtra, /^inline/.test(s.display)); }
+        var wasFixed = ts.__text.multiline;
+        applySizing(ts, tr, null, null, tctx, 0, true);
+        // text wraps inside the box: let it take the width the box gives
+        if (wasFixed && near(tr.width, contentBox.w, 1.5)) { delete ts.width; ts.layoutSizingHorizontal = "FILL"; }
+        spec.children = [ts];
+        // the box height is the line box, which can be a few pixels taller than the glyph range
+        var hugBoxH = tr.height + pad.t + pad.b + bd.t + bd.b;
+        if (Math.abs(rect.height - hugBoxH) <= Math.max(3, ts.fontSize * 0.35)) hugBoxH = rect.height;
+        return finishFrame(spec, rect, ctx, tr.width + pad.l + pad.r + bd.l + bd.r, hugBoxH, grow, boxExtra, /^inline/.test(s.display));
+      };
+
+      var finishFrame = function (spec, rect, ctx, hugW, hugH, grow, extra, inline) {
+        applySizing(spec, rect, hugW, hugH, ctx, grow, false, inline);
+        if (extra && extra.length) {
+          var autoSelf = !!spec.layoutMode && spec.layoutMode !== "NONE";
+          extra.forEach(function (line) {
+            delete line.__border;
+            if (autoSelf) line.layoutPositioning = "ABSOLUTE";
+          });
+          spec.children = (spec.children || []).concat(extra);
+        }
+        return spec;
+      };
+
+      var buildImage = function (el, rect, ctx, s, grow) {
+        var src = el.getAttribute("data-src") || "";
+        var w = rect.width, h = rect.height;
+        if (w < 1 || h < 1) { w = Number(el.getAttribute("width")) || 100; h = Number(el.getAttribute("height")) || 100; warnOnce('Image "' + src.slice(0, 60) + '" has no size in the CSS; used ' + w + "x" + h + ". Give it width/height."); rect = { left: rect.left, top: rect.top, right: rect.left + w, bottom: rect.top + h, width: w, height: h }; }
+        var spec = { type: "RECTANGLE", name: el.getAttribute("alt") ? "img: " + el.getAttribute("alt").slice(0, 40) : "img" };
+        var fit = s.objectFit;
+        if (src) spec.fills = [Object.assign({ type: "IMAGE", scaleMode: fit === "contain" || fit === "scale-down" ? "FIT" : "FILL" }, imageSource(src))];
+        else { spec.fills = ["#E5E7EB"]; warnOnce("An <img> has no src; drawn as a grey placeholder."); }
+        stats.images++;
+        var rad = radiiOf(s, rect.width, rect.height);
+        if (rad.every(function (r) { return r === rad[0]; })) { if (rad[0] > 0) spec.cornerRadius = rad[0]; }
+        else { spec.topLeftRadius = rad[0]; spec.topRightRadius = rad[1]; spec.bottomRightRadius = rad[2]; spec.bottomLeftRadius = rad[3]; }
+        var effects = parseShadows(s.boxShadow); if (effects.length) spec.effects = effects;
+        var op = parseFloat(s.opacity); if (isFinite(op) && op < 1) spec.opacity = r2(op);
+        // an image keeps its size; it does not stretch with the parent
+        var auto = ctx.kind === "H" || ctx.kind === "V";
+        spec.width = r2(rect.width); spec.height = r2(rect.height);
+        if (auto) { spec.layoutSizingHorizontal = "FIXED"; spec.layoutSizingVertical = "FIXED"; }
+        return spec;
+      };
+
+      var buildSvg = function (el, rect, ctx, s) {
+        var clone = el.cloneNode(true);
+        if (!clone.getAttribute("xmlns")) clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+        clone.setAttribute("width", r2(rect.width)); clone.setAttribute("height", r2(rect.height));
+        var color = colorHex(s.color) || "#000000";
+        var markup = clone.outerHTML.replace(/currentColor/gi, color);
+        if (clone.querySelector("[class]") || /\bclass=/.test(markup.slice(0, 200))) warnOnce("An inline <svg> uses CSS classes; Figma cannot read those styles, so set fill/stroke attributes on the SVG itself.");
+        stats.vectors++;
+        var spec = { type: "SVG", name: el.getAttribute("aria-label") || el.getAttribute("data-name") || "svg", svg: markup, width: r2(rect.width), height: r2(rect.height) };
+        if (ctx.kind === "H" || ctx.kind === "V") { spec.layoutSizingHorizontal = "FIXED"; spec.layoutSizingVertical = "FIXED"; }
+        return spec;
+      };
+
+      // input / textarea / select: a box with the value (or placeholder) as text
+      var buildField = function (el, rect, ctx, s, grow) {
+        var type = (el.getAttribute("type") || "text").toLowerCase();
+        var textual = el.tagName !== "INPUT" || !/^(checkbox|radio|hidden|file|range|color|image)$/.test(type);
+        var spec = { type: "FRAME", name: elName(el) };
+        stats.frames++;
+        var boxExtra = boxProps(spec, el, s, rect);
+        if (!textual) { warnOnce("Checkboxes, radios and other special inputs are drawn as plain boxes."); return finishFrame(spec, rect, ctx, null, null, grow, boxExtra, /^inline/.test(s.display)); }
+        var value = el.tagName === "SELECT" ? (el.selectedOptions[0] ? el.selectedOptions[0].textContent : "") : (el.value || el.getAttribute("value") || "");
+        var placeholder = !value;
+        if (placeholder) value = el.getAttribute("placeholder") || "";
+        var pad = padOf(s), bd = borderOf(s), st = styleOf(el, el);
+        spec.layoutMode = "HORIZONTAL";
+        spec.paddingTop = r2(pad.t + bd.t); spec.paddingRight = r2(pad.r + bd.r); spec.paddingBottom = r2(pad.b + bd.b); spec.paddingLeft = r2(pad.l + bd.l);
+        spec.primaryAxisAlignItems = alignOf(s) === "CENTER" ? "CENTER" : alignOf(s) === "RIGHT" ? "MAX" : "MIN";
+        spec.counterAxisAlignItems = el.tagName === "TEXTAREA" ? "MIN" : "CENTER";
+        if (value) {
+          var c = parseColor(s.color), col = c ? hex(placeholder ? { r: c.r, g: c.g, b: c.b, a: Math.min(c.a, 0.5) } : c) : "#000000";
+          var t = { type: "TEXT", characters: value, fontFamily: st.fontFamily, fontStyle: st.fontStyle, fontSize: st.fontSize, textColor: col, layoutSizingHorizontal: "FILL", textAutoResize: "HEIGHT", textAlignHorizontal: alignOf(s) };
+          if (st.lineHeight) t.lineHeight = r2(st.lineHeight);
+          spec.children = [t]; stats.texts++;
+        }
+        return finishFrame(spec, rect, ctx, null, null, grow, boxExtra, /^inline/.test(s.display));
+      };
+
+      var buildContainer = function (el, rect, ctx, s, grow) {
+        var pad = padOf(s), bd = borderOf(s);
+        var box = { x: rect.left + bd.l + pad.l, y: rect.top + bd.t + pad.t, w: rect.width - bd.l - bd.r - pad.l - pad.r, h: rect.height - bd.t - bd.b - pad.t - pad.b };
+        var spec = { type: "FRAME", name: elName(el) };
+        stats.frames++;
+        var extra = boxProps(spec, el, s, rect);
+        var items = collectItems(el);
+        var flow = items.filter(function (i) { return !i.abs; });
+        var absItems = items.filter(function (i) { return i.abs; });
+        var cls = absoluteMode ? { kind: "NONE" } : classify(flow, box, s);
+        if (cls.failed) { stats.absoluteFallbacks++; warnOnce('"' + elName(el) + '" has an arrangement that is not a row or a column; its children are placed at absolute positions.'); }
+        var p = { l: pad.l + bd.l, r: pad.r + bd.r, t: pad.t + bd.t, b: pad.b + bd.b };
+        var children = [], hugW = null, hugH = null;
+        var rel = function (it) { return { x: r2(it.rect.left - rect.left), y: r2(it.rect.top - rect.top) }; };
+
+        if (cls.kind === "NONE" || cls.kind === undefined) {
+          flow.forEach(function (it) {
+            var cs0 = buildItem(it, { kind: "NONE", box: box, n: flow.length, parentDisplay: s.display }, el);
+            if (cs0) { var o = rel(it); cs0.x = o.x; cs0.y = o.y; children.push(cs0); }
+          });
+        } else if (cls.kind === "GRID") {
+          spec.layoutMode = "VERTICAL"; spec.itemSpacing = cls.rowGap;
+          spec.primaryAxisAlignItems = "MIN"; spec.counterAxisAlignItems = "MIN";
+          cls.rows.forEach(function (row, ri) {
+            if (ri > 0 && cls.rowSpacers[ri - 1] > 0) children.push(spacerSpec(false, cls.rowSpacers[ri - 1]));
+            var lay = cls.rowLayouts[ri];
+            var rowBox = { x: box.x, y: row.top, w: box.w, h: row.bottom - row.top };
+            var rowSpec = { type: "FRAME", name: "row " + (ri + 1), layoutMode: "HORIZONTAL", itemSpacing: lay.spacing, primaryAxisAlignItems: lay.primary, counterAxisAlignItems: lay.counter, clipsContent: false, layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" };
+            if (lay.extraStart) rowSpec.paddingLeft = lay.extraStart;
+            var rctx = { kind: "H", box: rowBox, n: lay.items.length, parentDisplay: s.display, stretch: stretchOf(s), fillMain: lay.items.length > 1 && /grid/.test(s.display) };
+            lay.items.forEach(function (it, ii) {
+              if (ii > 0 && lay.spacers[ii - 1] > 0) (rowSpec.children = rowSpec.children || []).push(spacerSpec(true, lay.spacers[ii - 1]));
+              var c = buildItem(it, rctx, el);
+              if (c) (rowSpec.children = rowSpec.children || []).push(c);
+            });
+            stats.frames++;
+            if (rowSpec.children) children.push(rowSpec);
+          });
+          hugH = cls.rows[cls.rows.length - 1].bottom - cls.rows[0].top + p.t + p.b;
+        } else {
+          var lay2 = cls.layout, H = cls.kind === "H";
+          spec.layoutMode = H ? "HORIZONTAL" : "VERTICAL";
+          spec.itemSpacing = lay2.spacing;
+          spec.primaryAxisAlignItems = lay2.primary; spec.counterAxisAlignItems = lay2.counter;
+          if (lay2.extraStart) { if (H) p.l += lay2.extraStart; else p.t += lay2.extraStart; }
+          if (lay2.extraCounter) { if (H) p.t += lay2.extraCounter; else p.l += lay2.extraCounter; }
+          if (/^wrap/.test(s.flexWrap) && H && flow.length > 1) { spec.layoutWrap = "WRAP"; spec.counterAxisSpacing = s.rowGap === "normal" ? 0 : px(s.rowGap); }
+          var cctx = { kind: cls.kind, box: box, n: flow.length, parentDisplay: s.display, stretch: stretchOf(s), fillMain: cls.isGrid && H && flow.length > 1 && lay2.primary === "MIN" && near(flow.reduce(function (a, it) { return a + it.rect.width; }, 0) + (flow.length - 1) * lay2.spacing, box.w, 1) };
+          var built = [];
+          lay2.items.forEach(function (it, ii) {
+            if (ii > 0 && lay2.spacers[ii - 1] > 0) children.push(spacerSpec(H, lay2.spacers[ii - 1]));
+            var off = lay2.offsets ? lay2.offsets[ii] : 0, ictx = cctx;
+            if (off > 0) { // the child is inside a padded wrapper, so it sees a narrower container
+              ictx = Object.assign({}, cctx, { box: H ? { x: box.x, y: box.y + off, w: box.w, h: box.h - off } : { x: box.x + off, y: box.y, w: box.w - off, h: box.h } });
+            }
+            var c = buildItem(it, ictx, el);
+            if (c && off > 0) c = marginWrapper(c, off, H);
+            if (c) { children.push(c); built.push({ it: it, c: c, off: off }); }
+          });
+          var first = lay2.items[0].rect, lastR = lay2.items[lay2.items.length - 1].rect;
+          // hug size: the extent of the children along the layout, the largest child across it. Children that
+          // stretch with this container (FILL) say nothing about its size, so they are left out.
+          var mainKey = H ? "layoutSizingHorizontal" : "layoutSizingVertical", crossKey = H ? "layoutSizingVertical" : "layoutSizingHorizontal";
+          var mainHug = lay2.spaceBetween || built.some(function (b) { return b.c[mainKey] === "FILL"; }) ? null : (H ? lastR.right - first.left + p.l + p.r : lastR.bottom - first.top + p.t + p.b);
+          var crossKids = built.filter(function (b) { return b.c[crossKey] !== "FILL"; });
+          var crossHug = crossKids.length ? Math.max.apply(null, crossKids.map(function (b) { return (H ? b.it.rect.height : b.it.rect.width) + b.off; })) + (H ? p.t + p.b : p.l + p.r) : null;
+          if (H) { hugW = mainHug; hugH = crossHug; } else { hugH = mainHug; hugW = crossHug; }
+          if (spec.layoutWrap) { hugW = null; hugH = null; }
+        }
+        if (spec.layoutMode) {
+          spec.paddingTop = r2(p.t); spec.paddingRight = r2(p.r); spec.paddingBottom = r2(p.b); spec.paddingLeft = r2(p.l);
+        }
+        // absolutely positioned children (badges, overlays)
+        var selfAuto = spec.layoutMode === "HORIZONTAL" || spec.layoutMode === "VERTICAL";
+        absItems.forEach(function (it) {
+          var c = buildItem(it, { kind: "NONE", box: box, n: 1, parentDisplay: s.display }, el);
+          if (!c) return;
+          var o = rel(it); c.x = o.x; c.y = o.y;
+          if (selfAuto) c.layoutPositioning = "ABSOLUTE";
+          children.push(c);
+        });
+        if (children.length) spec.children = children;
+        return finishFrame(spec, rect, ctx, hugW, hugH, grow, extra, /^inline/.test(s.display));
+      };
+
+      // ---- root
+      var body = idoc.body, html = idoc.documentElement;
+      var kids = Array.prototype.filter.call(body.children, function (c) { return !SKIP[c.tagName] && !hidden(c); });
+      var rootEl = opts.selector ? idoc.querySelector(opts.selector) : kids.length === 1 && !hasText(body) ? kids[0] : body;
+      if (!rootEl) throw new Error('selector "' + opts.selector + '" matches nothing in the HTML');
+      var rootRect = rectOf(rootEl);
+      var rootCtx = { kind: "ROOT", box: { x: 0, y: 0, w: width, h: height }, n: 1 };
+      var spec;
+      var rs = cs(rootEl);
+      if (/^(IMG|svg|SVG|INPUT|TEXTAREA|SELECT)$/.test(rootEl.tagName)) spec = buildElement(rootEl, rootRect, rootCtx);
+      else if (isTextOnly(rootEl) && !isBoxed(rs)) {
+        spec = textSpec(rootEl, rootRect);
+        if (!spec) throw new Error("The HTML has no visible content");
+        applySizing(spec, rootRect, null, null, rootCtx, 0, true, false);
+      } else if (isTextOnly(rootEl)) spec = buildTextBox(rootEl, rootRect, rootCtx, rs, 0);
+      else spec = buildContainer(rootEl, rootRect, rootCtx, rs, 0);
+      if (!spec || (spec.type === "FRAME" && !(spec.children && spec.children.length) && !(spec.fills && spec.fills.length) && !spec.strokes && !spec.effects)) {
+        throw new Error("The HTML has no visible content");
+      }
+      // a page background set on <body> or <html> belongs to the root frame
+      if (spec.type === "FRAME" && !(spec.fills && spec.fills.length)) {
+        var pageBg = colorHex(cs(body).backgroundColor) || colorHex(cs(html).backgroundColor);
+        if (pageBg) spec.fills = [pageBg];
+      }
+      if (opts.name) spec.name = String(opts.name);
+      var pseudo = 0;
+      Array.prototype.forEach.call(idoc.querySelectorAll("*"), function (e) {
+        ["::before", "::after"].forEach(function (p) {
+          var c = cs(e, p).content; if (c && c !== "none" && c !== "normal" && cs(e, p).display !== "none") pseudo++;
+        });
+      });
+      if (pseudo) warnOnce(pseudo + " ::before/::after element(s) were not imported (they cannot be measured).");
+      if (idoc.querySelector("ul li, ol li")) warnOnce("List markers (bullets, numbers) are not imported; add them as text if needed.");
+      return { spec: spec, warnings: warnings, stats: stats };
+    }
+  }
+  window.htmlToSpec = htmlToSpec;
+})();
+</script>
 <script>
   const dot = document.getElementById("dot");
   const statusEl = document.getElementById("status");
@@ -93,6 +920,14 @@
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
       log(`> ${msg.command}`);
+      if (msg.command === "html_to_spec") { // needs a DOM, so it is answered here instead of in code.js
+        const p = msg.params || {};
+        window.htmlToSpec(p.html, p).then(
+          (result) => { ws.send(JSON.stringify({ id: msg.id, ok: true, result })); log("< ok (html converted)"); },
+          (e) => { ws.send(JSON.stringify({ id: msg.id, ok: false, error: String((e && e.message) || e) })); log("< error: " + ((e && e.message) || e)); }
+        );
+        return;
+      }
       parent.postMessage({ pluginMessage: msg }, "*");
     };
   }

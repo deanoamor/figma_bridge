@@ -1,0 +1,698 @@
+{
+ "type": "FRAME",
+ "name": "div.page",
+ "fills": [
+  "#FFFFFF"
+ ],
+ "clipsContent": false,
+ "layoutMode": "VERTICAL",
+ "itemSpacing": 0,
+ "primaryAxisAlignItems": "MIN",
+ "counterAxisAlignItems": "MIN",
+ "paddingTop": 0,
+ "paddingRight": 0,
+ "paddingBottom": 0,
+ "paddingLeft": 0,
+ "children": [
+  {
+   "type": "FRAME",
+   "name": "nav",
+   "clipsContent": false,
+   "layoutMode": "HORIZONTAL",
+   "itemSpacing": 0,
+   "primaryAxisAlignItems": "SPACE_BETWEEN",
+   "counterAxisAlignItems": "CENTER",
+   "paddingTop": 20,
+   "paddingRight": 80,
+   "paddingBottom": 21,
+   "paddingLeft": 80,
+   "children": [
+    {
+     "type": "TEXT",
+     "fontFamily": "Poppins",
+     "fontStyle": "Bold",
+     "fontSize": 22,
+     "textColor": "#0F172A",
+     "characters": "momen",
+     "textAlignHorizontal": "LEFT",
+     "textAutoResize": "WIDTH_AND_HEIGHT",
+     "layoutSizingHorizontal": "HUG",
+     "layoutSizingVertical": "HUG"
+    },
+    {
+     "type": "FRAME",
+     "name": "div.links",
+     "clipsContent": false,
+     "layoutMode": "HORIZONTAL",
+     "itemSpacing": 32,
+     "primaryAxisAlignItems": "MIN",
+     "counterAxisAlignItems": "MIN",
+     "paddingTop": 0,
+     "paddingRight": 0,
+     "paddingBottom": 0,
+     "paddingLeft": 0,
+     "children": [
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Medium",
+       "fontSize": 15,
+       "textColor": "#0F172A",
+       "characters": "Fitur",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "WIDTH_AND_HEIGHT",
+       "layoutSizingHorizontal": "HUG",
+       "layoutSizingVertical": "HUG"
+      },
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Medium",
+       "fontSize": 15,
+       "textColor": "#0F172A",
+       "characters": "Harga",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "WIDTH_AND_HEIGHT",
+       "layoutSizingHorizontal": "HUG",
+       "layoutSizingVertical": "HUG"
+      },
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Medium",
+       "fontSize": 15,
+       "textColor": "#0F172A",
+       "characters": "Kontak",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "WIDTH_AND_HEIGHT",
+       "layoutSizingHorizontal": "HUG",
+       "layoutSizingVertical": "HUG"
+      }
+     ],
+     "layoutSizingHorizontal": "HUG",
+     "layoutSizingVertical": "HUG"
+    },
+    {
+     "type": "FRAME",
+     "name": "a.btn",
+     "layoutMode": "HORIZONTAL",
+     "fills": [
+      "#2563EB"
+     ],
+     "cornerRadius": 23.5,
+     "effects": [
+      {
+       "type": "DROP_SHADOW",
+       "color": "#2563EB",
+       "opacity": 0.3,
+       "x": 0,
+       "y": 4,
+       "blur": 12,
+       "spread": 0
+      }
+     ],
+     "clipsContent": false,
+     "paddingTop": 12,
+     "paddingRight": 24,
+     "paddingBottom": 12,
+     "paddingLeft": 24,
+     "primaryAxisAlignItems": "MIN",
+     "counterAxisAlignItems": "CENTER",
+     "children": [
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Semi Bold",
+       "fontSize": 15,
+       "textColor": "#FFFFFF",
+       "characters": "Coba gratis",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "WIDTH_AND_HEIGHT",
+       "layoutSizingHorizontal": "HUG",
+       "layoutSizingVertical": "HUG"
+      }
+     ],
+     "layoutSizingHorizontal": "HUG",
+     "layoutSizingVertical": "HUG"
+    },
+    {
+     "type": "RECTANGLE",
+     "name": "border-bottom",
+     "fills": [
+      "#E2E8F0"
+     ],
+     "width": 1440,
+     "height": 1,
+     "x": 0,
+     "y": 87,
+     "layoutPositioning": "ABSOLUTE"
+    }
+   ],
+   "layoutSizingHorizontal": "FILL",
+   "layoutSizingVertical": "HUG"
+  },
+  {
+   "type": "FRAME",
+   "name": "section.hero",
+   "fills": [
+    {
+     "type": "GRADIENT_LINEAR",
+     "cssAngle": 135,
+     "stops": [
+      {
+       "position": 0,
+       "color": "#EFF6FF"
+      },
+      {
+       "position": 1,
+       "color": "#DBEAFE"
+      }
+     ]
+    }
+   ],
+   "clipsContent": false,
+   "layoutMode": "VERTICAL",
+   "itemSpacing": 24,
+   "primaryAxisAlignItems": "MIN",
+   "counterAxisAlignItems": "MIN",
+   "paddingTop": 96,
+   "paddingRight": 80,
+   "paddingBottom": 96,
+   "paddingLeft": 80,
+   "children": [
+    {
+     "type": "TEXT",
+     "fontFamily": "Poppins",
+     "fontStyle": "Bold",
+     "fontSize": 56,
+     "textColor": "#0F172A",
+     "lineHeight": 64,
+     "runs": [
+      {
+       "text": "Kelola bisnis "
+      },
+      {
+       "text": "lebih mudah",
+       "color": "#2563EB"
+      },
+      {
+       "text": " dari satu tempat"
+      }
+     ],
+     "textAlignHorizontal": "LEFT",
+     "textAutoResize": "HEIGHT",
+     "width": 640,
+     "layoutSizingHorizontal": "FIXED",
+     "layoutSizingVertical": "HUG"
+    },
+    {
+     "type": "TEXT",
+     "fontFamily": "Poppins",
+     "fontStyle": "Regular",
+     "fontSize": 18,
+     "textColor": "#475569",
+     "lineHeight": 28,
+     "runs": [
+      {
+       "text": "Semua yang kamu butuhkan, "
+      },
+      {
+       "text": "cepat",
+       "fontStyle": "Bold"
+      },
+      {
+       "text": " dan "
+      },
+      {
+       "text": "aman",
+       "textDecoration": "UNDERLINE"
+      },
+      {
+       "text": "."
+      }
+     ],
+     "textAlignHorizontal": "LEFT",
+     "textAutoResize": "WIDTH_AND_HEIGHT",
+     "layoutSizingHorizontal": "HUG",
+     "layoutSizingVertical": "HUG"
+    },
+    {
+     "type": "FRAME",
+     "name": "spacer",
+     "width": 1,
+     "height": 8,
+     "layoutSizingHorizontal": "FIXED",
+     "layoutSizingVertical": "FIXED"
+    },
+    {
+     "type": "FRAME",
+     "name": "div.cta",
+     "clipsContent": false,
+     "layoutMode": "HORIZONTAL",
+     "itemSpacing": 16,
+     "primaryAxisAlignItems": "MIN",
+     "counterAxisAlignItems": "MIN",
+     "paddingTop": 0,
+     "paddingRight": 0,
+     "paddingBottom": 0,
+     "paddingLeft": 0,
+     "children": [
+      {
+       "type": "FRAME",
+       "name": "a.btn",
+       "layoutMode": "HORIZONTAL",
+       "fills": [
+        "#2563EB"
+       ],
+       "cornerRadius": 24.5,
+       "effects": [
+        {
+         "type": "DROP_SHADOW",
+         "color": "#2563EB",
+         "opacity": 0.3,
+         "x": 0,
+         "y": 4,
+         "blur": 12,
+         "spread": 0
+        }
+       ],
+       "clipsContent": false,
+       "paddingTop": 12,
+       "paddingRight": 24,
+       "paddingBottom": 12,
+       "paddingLeft": 24,
+       "primaryAxisAlignItems": "MIN",
+       "counterAxisAlignItems": "CENTER",
+       "children": [
+        {
+         "type": "TEXT",
+         "fontFamily": "Poppins",
+         "fontStyle": "Semi Bold",
+         "fontSize": 15,
+         "textColor": "#FFFFFF",
+         "characters": "Mulai sekarang",
+         "textAlignHorizontal": "LEFT",
+         "textAutoResize": "WIDTH_AND_HEIGHT",
+         "layoutSizingHorizontal": "HUG",
+         "layoutSizingVertical": "HUG"
+        }
+       ],
+       "layoutSizingHorizontal": "HUG",
+       "layoutSizingVertical": "HUG"
+      },
+      {
+       "type": "FRAME",
+       "name": "a.btn",
+       "layoutMode": "HORIZONTAL",
+       "fills": [
+        "#FFFFFF"
+       ],
+       "strokes": [
+        "#CBD5E1"
+       ],
+       "strokeWeight": 1,
+       "strokeAlign": "INSIDE",
+       "cornerRadius": 24.5,
+       "clipsContent": false,
+       "paddingTop": 13,
+       "paddingRight": 25,
+       "paddingBottom": 13,
+       "paddingLeft": 25,
+       "primaryAxisAlignItems": "MIN",
+       "counterAxisAlignItems": "CENTER",
+       "children": [
+        {
+         "type": "TEXT",
+         "fontFamily": "Poppins",
+         "fontStyle": "Semi Bold",
+         "fontSize": 15,
+         "textColor": "#0F172A",
+         "characters": "Lihat demo",
+         "textAlignHorizontal": "LEFT",
+         "textAutoResize": "WIDTH_AND_HEIGHT",
+         "layoutSizingHorizontal": "HUG",
+         "layoutSizingVertical": "HUG"
+        }
+       ],
+       "layoutSizingHorizontal": "HUG",
+       "layoutSizingVertical": "HUG"
+      }
+     ],
+     "layoutSizingHorizontal": "FILL",
+     "layoutSizingVertical": "HUG"
+    },
+    {
+     "type": "FRAME",
+     "name": "span.badge",
+     "layoutMode": "HORIZONTAL",
+     "fills": [
+      "#FFFFFF"
+     ],
+     "strokes": [
+      "#E2E8F0"
+     ],
+     "strokeWeight": 1,
+     "strokeAlign": "INSIDE",
+     "cornerRadius": 12,
+     "clipsContent": false,
+     "paddingTop": 9,
+     "paddingRight": 15,
+     "paddingBottom": 9,
+     "paddingLeft": 15,
+     "primaryAxisAlignItems": "MIN",
+     "counterAxisAlignItems": "CENTER",
+     "children": [
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Regular",
+       "fontSize": 13,
+       "textColor": "#0F172A",
+       "characters": "Baru · v2.0",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "WIDTH_AND_HEIGHT",
+       "layoutSizingHorizontal": "HUG",
+       "layoutSizingVertical": "HUG"
+      }
+     ],
+     "width": 95.3,
+     "height": 38,
+     "x": 1264.7,
+     "y": 40,
+     "layoutPositioning": "ABSOLUTE"
+    }
+   ],
+   "layoutSizingHorizontal": "FILL",
+   "layoutSizingVertical": "HUG"
+  },
+  {
+   "type": "FRAME",
+   "name": "section.grid",
+   "clipsContent": false,
+   "layoutMode": "HORIZONTAL",
+   "itemSpacing": 24,
+   "primaryAxisAlignItems": "MIN",
+   "counterAxisAlignItems": "MIN",
+   "paddingTop": 80,
+   "paddingRight": 80,
+   "paddingBottom": 80,
+   "paddingLeft": 80,
+   "children": [
+    {
+     "type": "FRAME",
+     "name": "div.card",
+     "strokes": [
+      "#E2E8F0"
+     ],
+     "strokeWeight": 1,
+     "strokeAlign": "INSIDE",
+     "cornerRadius": 16,
+     "effects": [
+      {
+       "type": "DROP_SHADOW",
+       "color": "#000000",
+       "opacity": 0.08,
+       "x": 0,
+       "y": 1,
+       "blur": 3,
+       "spread": 0
+      }
+     ],
+     "clipsContent": false,
+     "layoutMode": "VERTICAL",
+     "itemSpacing": 8,
+     "primaryAxisAlignItems": "MIN",
+     "counterAxisAlignItems": "MIN",
+     "paddingTop": 25,
+     "paddingRight": 25,
+     "paddingBottom": 25,
+     "paddingLeft": 25,
+     "children": [
+      {
+       "type": "FRAME",
+       "name": "div.icon",
+       "fills": [
+        "#DBEAFE"
+       ],
+       "cornerRadius": 12,
+       "clipsContent": false,
+       "layoutMode": "HORIZONTAL",
+       "itemSpacing": 0,
+       "primaryAxisAlignItems": "CENTER",
+       "counterAxisAlignItems": "CENTER",
+       "paddingTop": 0,
+       "paddingRight": 0,
+       "paddingBottom": 0,
+       "paddingLeft": 0,
+       "children": [
+        {
+         "type": "SVG",
+         "name": "svg",
+         "svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#2563EB\" stroke-width=\"2\" style=\"color:#2563EB\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M5 12h14\"></path></svg>",
+         "width": 24,
+         "height": 24,
+         "layoutSizingHorizontal": "FIXED",
+         "layoutSizingVertical": "FIXED"
+        }
+       ],
+       "width": 48,
+       "height": 48,
+       "layoutSizingHorizontal": "FIXED",
+       "layoutSizingVertical": "FIXED"
+      },
+      {
+       "type": "FRAME",
+       "name": "spacer",
+       "width": 1,
+       "height": 8,
+       "layoutSizingHorizontal": "FIXED",
+       "layoutSizingVertical": "FIXED"
+      },
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Bold",
+       "fontSize": 20,
+       "textColor": "#0F172A",
+       "characters": "Cepat",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "HEIGHT",
+       "layoutSizingHorizontal": "FILL",
+       "layoutSizingVertical": "HUG"
+      },
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Regular",
+       "fontSize": 15,
+       "textColor": "#64748B",
+       "lineHeight": 24,
+       "characters": "Proses transaksi dalam hitungan detik tanpa antre.",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "HEIGHT",
+       "layoutSizingHorizontal": "FILL",
+       "layoutSizingVertical": "HUG"
+      }
+     ],
+     "layoutSizingHorizontal": "FILL",
+     "layoutSizingVertical": "HUG"
+    },
+    {
+     "type": "FRAME",
+     "name": "div.card",
+     "strokes": [
+      "#E2E8F0"
+     ],
+     "strokeWeight": 1,
+     "strokeAlign": "INSIDE",
+     "cornerRadius": 16,
+     "effects": [
+      {
+       "type": "DROP_SHADOW",
+       "color": "#000000",
+       "opacity": 0.08,
+       "x": 0,
+       "y": 1,
+       "blur": 3,
+       "spread": 0
+      }
+     ],
+     "clipsContent": false,
+     "layoutMode": "VERTICAL",
+     "itemSpacing": 8,
+     "primaryAxisAlignItems": "MIN",
+     "counterAxisAlignItems": "MIN",
+     "paddingTop": 25,
+     "paddingRight": 25,
+     "paddingBottom": 25,
+     "paddingLeft": 25,
+     "children": [
+      {
+       "type": "FRAME",
+       "name": "div.icon",
+       "fills": [
+        "#DBEAFE"
+       ],
+       "cornerRadius": 12,
+       "clipsContent": false,
+       "width": 48,
+       "height": 48,
+       "layoutSizingHorizontal": "FIXED",
+       "layoutSizingVertical": "FIXED"
+      },
+      {
+       "type": "FRAME",
+       "name": "spacer",
+       "width": 1,
+       "height": 8,
+       "layoutSizingHorizontal": "FIXED",
+       "layoutSizingVertical": "FIXED"
+      },
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Bold",
+       "fontSize": 20,
+       "textColor": "#0F172A",
+       "characters": "Aman",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "HEIGHT",
+       "layoutSizingHorizontal": "FILL",
+       "layoutSizingVertical": "HUG"
+      },
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Regular",
+       "fontSize": 15,
+       "textColor": "#64748B",
+       "lineHeight": 24,
+       "characters": "Data terenkripsi dan dicadangkan otomatis setiap hari.",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "HEIGHT",
+       "layoutSizingHorizontal": "FILL",
+       "layoutSizingVertical": "HUG"
+      }
+     ],
+     "layoutSizingHorizontal": "FILL",
+     "layoutSizingVertical": "HUG"
+    },
+    {
+     "type": "FRAME",
+     "name": "div.card",
+     "strokes": [
+      "#E2E8F0"
+     ],
+     "strokeWeight": 1,
+     "strokeAlign": "INSIDE",
+     "cornerRadius": 16,
+     "effects": [
+      {
+       "type": "DROP_SHADOW",
+       "color": "#000000",
+       "opacity": 0.08,
+       "x": 0,
+       "y": 1,
+       "blur": 3,
+       "spread": 0
+      }
+     ],
+     "clipsContent": false,
+     "layoutMode": "VERTICAL",
+     "itemSpacing": 8,
+     "primaryAxisAlignItems": "MIN",
+     "counterAxisAlignItems": "MIN",
+     "paddingTop": 25,
+     "paddingRight": 25,
+     "paddingBottom": 25,
+     "paddingLeft": 25,
+     "children": [
+      {
+       "type": "FRAME",
+       "name": "div.icon",
+       "fills": [
+        "#DBEAFE"
+       ],
+       "cornerRadius": 12,
+       "clipsContent": false,
+       "width": 48,
+       "height": 48,
+       "layoutSizingHorizontal": "FIXED",
+       "layoutSizingVertical": "FIXED"
+      },
+      {
+       "type": "FRAME",
+       "name": "spacer",
+       "width": 1,
+       "height": 8,
+       "layoutSizingHorizontal": "FIXED",
+       "layoutSizingVertical": "FIXED"
+      },
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Bold",
+       "fontSize": 20,
+       "textColor": "#0F172A",
+       "characters": "Fleksibel",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "HEIGHT",
+       "layoutSizingHorizontal": "FILL",
+       "layoutSizingVertical": "HUG"
+      },
+      {
+       "type": "TEXT",
+       "fontFamily": "Poppins",
+       "fontStyle": "Regular",
+       "fontSize": 15,
+       "textColor": "#64748B",
+       "lineHeight": 24,
+       "characters": "Sesuaikan dengan kebutuhan usahamu kapan saja.",
+       "textAlignHorizontal": "LEFT",
+       "textAutoResize": "HEIGHT",
+       "layoutSizingHorizontal": "FILL",
+       "layoutSizingVertical": "HUG"
+      }
+     ],
+     "layoutSizingHorizontal": "FILL",
+     "layoutSizingVertical": "HUG"
+    }
+   ],
+   "layoutSizingHorizontal": "FILL",
+   "layoutSizingVertical": "HUG"
+  },
+  {
+   "type": "FRAME",
+   "name": "footer",
+   "layoutMode": "HORIZONTAL",
+   "fills": [
+    "#0F172A"
+   ],
+   "clipsContent": false,
+   "paddingTop": 32,
+   "paddingRight": 32,
+   "paddingBottom": 32,
+   "paddingLeft": 32,
+   "primaryAxisAlignItems": "CENTER",
+   "counterAxisAlignItems": "CENTER",
+   "children": [
+    {
+     "type": "TEXT",
+     "fontFamily": "Poppins",
+     "fontStyle": "Regular",
+     "fontSize": 14,
+     "textColor": "#94A3B8",
+     "characters": "© 2026 momen",
+     "textAlignHorizontal": "CENTER",
+     "textAutoResize": "WIDTH_AND_HEIGHT",
+     "layoutSizingHorizontal": "HUG",
+     "layoutSizingVertical": "HUG"
+    }
+   ],
+   "layoutSizingHorizontal": "FILL",
+   "layoutSizingVertical": "HUG"
+  }
+ ],
+ "width": 1440,
+ "layoutSizingVertical": "HUG"
+}

@@ -44,6 +44,26 @@ function rgbToHex(c, a) {
   return out.toUpperCase();
 }
 
+// Linear gradient direction. `angle` is in degrees, clockwise, 0 = left to right:
+// 0 = to right, 90 = to bottom, 180 = to left, 270 = to top. For CSS-style values use
+// `cssAngle` (0deg = to top, 90deg = to right, 180deg = to bottom) or `direction` ("to bottom right").
+var GRADIENT_DIRECTIONS = {
+  "right": 0, "bottom right": 45, "bottom": 90, "bottom left": 135,
+  "left": 180, "top left": 225, "top": 270, "top right": 315,
+};
+function directionToAngle(dir) {
+  var words = String(dir).toLowerCase().replace(/^to\s+/, "").trim().split(/\s+/);
+  // "left top" means the same as "top left": put the vertical word first
+  words.sort(function (a, b) {
+    return (a === "top" || a === "bottom" ? 0 : 1) - (b === "top" || b === "bottom" ? 0 : 1);
+  });
+  var key = words.join(" ");
+  if (GRADIENT_DIRECTIONS[key] === undefined) {
+    throw new Error('Unknown gradient direction "' + dir + '". Use e.g. "to right", "to bottom", "to bottom right".');
+  }
+  return GRADIENT_DIRECTIONS[key];
+}
+
 function toPaint(p) {
   if (typeof p === "string") {
     var c = hexToRgba(p);
@@ -55,7 +75,10 @@ function toPaint(p) {
       var c = hexToRgba(s.color);
       return { position: s.position, color: { r: c.r, g: c.g, b: c.b, a: c.a } };
     });
-    var rad = ((p.angle || 0) * Math.PI) / 180;
+    var angle = p.angle || 0;
+    if (typeof p.cssAngle === "number") angle = p.cssAngle - 90;
+    else if (typeof p.direction === "string") angle = directionToAngle(p.direction);
+    var rad = (angle * Math.PI) / 180;
     var cos = Math.cos(rad), sin = Math.sin(rad);
     var t = [
       [cos, sin, 0.5 - 0.5 * cos - 0.5 * sin],
@@ -162,15 +185,47 @@ async function ensureFont(family, style) {
 async function getParent(parentId) {
   if (!parentId) return figma.currentPage;
   var p = await figma.getNodeByIdAsync(parentId);
-  if (!p) throw new Error("Parent not found: " + parentId);
+  if (!p) throw new Error("Parent not found: " + parentId + NODE_HINT);
   if (!("appendChild" in p)) throw new Error("Node " + parentId + " (" + p.type + ") cannot contain children");
   return p;
 }
 
+var NODE_HINT = ' Node ids look like "12:34" (copy them from a tool result, figma_list_children or figma_status). ' +
+  "A deleted node or an id from another file no longer exists.";
+
 async function getNode(id) {
-  var n = await figma.getNodeByIdAsync(id);
-  if (!n) throw new Error("Node not found: " + id);
+  var n = typeof id === "string" && id ? await figma.getNodeByIdAsync(id) : null;
+  if (!n) throw new Error("Node not found: " + id + "." + NODE_HINT);
+  // with dynamic-page access a page's children are only readable after it is loaded
+  if (n.type === "PAGE" && typeof n.loadAsync === "function") await n.loadAsync();
   return n;
+}
+
+// Move `node` (already a child of `parent`) so it ends up at position `index` (0 = first child,
+// which is the first item in an auto-layout row/column). Out-of-range values are clamped.
+function placeAt(parent, node, index) {
+  if (typeof index !== "number" || !isFinite(index)) return;
+  if (!("insertChild" in parent)) throw new Error("index needs a parent that can contain children");
+  var target = Math.max(0, Math.min(Math.floor(index), parent.children.length - 1));
+  parent.insertChild(target, node);
+  // insertChild's index is relative to the list without the moved node; verify and correct once
+  var actual = parent.children.indexOf(node);
+  if (actual !== target && actual >= 0) {
+    parent.insertChild(Math.max(0, Math.min(actual < target ? target + 1 : target - 1, parent.children.length - 1)), node);
+  }
+}
+
+// Figma returns the `figma.mixed` symbol for properties that differ inside one node, and a
+// symbol cannot be sent to the UI ("Cannot unwrap symbol"). Turn every symbol into "mixed".
+function clean(v) {
+  if (typeof v === "symbol") return "mixed";
+  if (Array.isArray(v)) return v.map(clean);
+  if (v && typeof v === "object") {
+    var out = {};
+    Object.keys(v).forEach(function (k) { if (typeof v[k] !== "function") out[k] = clean(v[k]); });
+    return out;
+  }
+  return v;
 }
 
 // ---- variables: bind design tokens to nodes by name ("collection/variable", e.g. "light/primary")
@@ -252,6 +307,15 @@ async function rebindNode(node, from, to, stats, c) {
   }
 }
 
+// Flipping the auto-resize mode forces Figma to recompute the text box from its current width,
+// font and content; the original mode is restored afterwards.
+function remeasureText(node) {
+  var mode = node.textAutoResize;
+  if (mode === "NONE" || mode === figma.mixed) return;
+  node.textAutoResize = "NONE";
+  node.textAutoResize = mode;
+}
+
 // ------------------------------------------------------------- apply props
 async function applyProps(node, spec, isCreate) {
   var type = node.type;
@@ -288,6 +352,18 @@ async function applyProps(node, spec, isCreate) {
     if (has("textAutoResize")) node.textAutoResize = spec.textAutoResize;
     if (has("textColor")) node.fills = await toPaintsAsync(spec.textColor);
   }
+
+  // --- absolute positioning inside an auto-layout parent. This must come BEFORE x/y: while the node
+  // is still part of the flow, Figma ignores x/y.
+  var flowParent = node.parent;
+  var flowParentIsAuto = !!(flowParent && "layoutMode" in flowParent && flowParent.layoutMode !== "NONE");
+  if (has("layoutPositioning")) {
+    if (spec.layoutPositioning === "ABSOLUTE" && !flowParentIsAuto) {
+      throw new Error('layoutPositioning "ABSOLUTE" needs a parent with auto layout (layoutMode HORIZONTAL or VERTICAL)');
+    }
+    if (flowParentIsAuto) node.layoutPositioning = spec.layoutPositioning;
+  }
+  if (has("constraints") && "constraints" in node) node.constraints = spec.constraints;
 
   // --- size / position
   if (has("width") || has("height")) {
@@ -333,6 +409,16 @@ async function applyProps(node, spec, isCreate) {
     if (has("paddingRight")) node.paddingRight = spec.paddingRight;
     if (has("paddingBottom")) node.paddingBottom = spec.paddingBottom;
     if (has("paddingLeft")) node.paddingLeft = spec.paddingLeft;
+
+    // A new auto-layout frame used to stay 100x100 unless both axes were set. Hug the content on
+    // every axis the caller did not size (width/height, layoutSizing*, or an *AxisSizingMode).
+    if (isCreate && (spec.layoutMode === "HORIZONTAL" || spec.layoutMode === "VERTICAL") && type !== "INSTANCE") {
+      var rowLayout = spec.layoutMode === "HORIZONTAL";
+      var sizedH = has("width") || has("layoutSizingHorizontal") || has(rowLayout ? "primaryAxisSizingMode" : "counterAxisSizingMode");
+      var sizedV = has("height") || has("layoutSizingVertical") || has(rowLayout ? "counterAxisSizingMode" : "primaryAxisSizingMode");
+      if (!sizedH) node.layoutSizingHorizontal = "HUG";
+      if (!sizedV) node.layoutSizingVertical = "HUG";
+    }
   }
 
   // --- child sizing inside an auto-layout parent (must be after being appended)
@@ -343,7 +429,6 @@ async function applyProps(node, spec, isCreate) {
     if (has("layoutSizingVertical")) node.layoutSizingVertical = spec.layoutSizingVertical;
     if (has("layoutGrow")) node.layoutGrow = spec.layoutGrow;
     if (has("layoutAlign")) node.layoutAlign = spec.layoutAlign;
-    if (has("layoutPositioning")) node.layoutPositioning = spec.layoutPositioning;
   } else if (
     (has("layoutSizingHorizontal") || has("layoutSizingVertical")) &&
     (node.type === "FRAME" || node.type === "COMPONENT") && node.layoutMode !== "NONE"
@@ -351,6 +436,14 @@ async function applyProps(node, spec, isCreate) {
     // a root auto-layout frame can HUG/FIXED itself
     if (has("layoutSizingHorizontal") && spec.layoutSizingHorizontal !== "FILL") node.layoutSizingHorizontal = spec.layoutSizingHorizontal;
     if (has("layoutSizingVertical") && spec.layoutSizingVertical !== "FILL") node.layoutSizingVertical = spec.layoutSizingVertical;
+  }
+
+  // --- text: re-measure after width / font / content / layout changes. Figma does not always recompute
+  // the height right away (a title stayed 3 lines tall although its new width fits in 2).
+  if (type === "TEXT" && (has("width") || has("fontSize") || has("fontFamily") || has("fontStyle") ||
+      has("characters") || has("lineHeight") || has("letterSpacing") || has("textAutoResize") ||
+      has("layoutSizingHorizontal") || has("layoutSizingVertical"))) {
+    remeasureText(node);
   }
 
   // --- variable bindings, last so layout and size are already set: { field: "collection/name" | null }
@@ -383,6 +476,13 @@ async function createNodeTree(spec, parent, created, anim) {
     case "LINE": node = figma.createLine(); break;
     case "POLYGON": node = figma.createPolygon(); break;
     case "STAR": node = figma.createStar(); break;
+    case "SVG":
+      // spec.svg = SVG markup; Figma turns it into a frame holding editable vectors
+      if (typeof spec.svg !== "string" || spec.svg.indexOf("<svg") === -1) {
+        throw new Error("SVG node needs spec.svg (an SVG markup string starting with <svg)");
+      }
+      node = figma.createNodeFromSvg(spec.svg);
+      break;
     default: throw new Error("Unsupported node type: " + type);
   }
   parent.appendChild(node);
@@ -422,8 +522,44 @@ function simplifyPaints(paints) {
       return sp;
     }
     if (p.type === "IMAGE") return { type: "IMAGE", imageHash: p.imageHash, scaleMode: p.scaleMode };
+    if (p.type === "GRADIENT_LINEAR" || p.type === "GRADIENT_RADIAL") {
+      var gp = { type: p.type };
+      if (p.type === "GRADIENT_LINEAR" && p.gradientTransform) gp.angle = gradientAngle(p.gradientTransform);
+      gp.stops = (p.gradientStops || []).map(function (s) {
+        return { position: round(s.position), color: rgbToHex(s.color, s.color.a === undefined ? 1 : s.color.a) };
+      });
+      return gp;
+    }
     return { type: p.type };
   });
+}
+
+// Inverse of the angle used when creating a linear gradient (same convention: 0 = left to right,
+// 90 = top to bottom, clockwise).
+function gradientAngle(t) {
+  var a = (Math.atan2(t[0][1], t[0][0]) * 180) / Math.PI;
+  if (a < 0) a += 360;
+  return Math.round(a * 100) / 100;
+}
+
+// Effects use the same format figma_create accepts: { type, color, opacity, x, y, blur, spread }.
+function serializeEffect(e) {
+  var o;
+  if (e.type === "LAYER_BLUR" || e.type === "BACKGROUND_BLUR") {
+    o = { type: e.type, blur: e.radius };
+  } else {
+    o = {
+      type: e.type,
+      color: rgbToHex(e.color),
+      opacity: round(e.color.a === undefined ? 1 : e.color.a),
+      x: e.offset ? e.offset.x : 0,
+      y: e.offset ? e.offset.y : 0,
+      blur: e.radius,
+      spread: e.spread || 0,
+    };
+  }
+  if (e.visible === false) o.visible = false;
+  return o;
 }
 
 function serialize(node, depth) {
@@ -441,6 +577,8 @@ function serialize(node, depth) {
     o.strokeWeight = node.strokeWeight;
   }
   if ("cornerRadius" in node && node.cornerRadius !== 0) o.cornerRadius = node.cornerRadius === figma.mixed ? "mixed" : node.cornerRadius;
+  if ("effects" in node && Array.isArray(node.effects) && node.effects.length) o.effects = node.effects.map(serializeEffect);
+  if ("layoutPositioning" in node && node.layoutPositioning === "ABSOLUTE") o.layoutPositioning = "ABSOLUTE";
   if ("layoutMode" in node && node.layoutMode !== "NONE") {
     o.layoutMode = node.layoutMode;
     o.itemSpacing = node.itemSpacing;
@@ -467,8 +605,13 @@ function serialize(node, depth) {
     if (Object.keys(bound).length) o.bound = bound;
   }
   if ("children" in node) {
-    if (depth > 0) o.children = node.children.map(function (c) { return serialize(c, depth - 1); });
-    else o.childCount = node.children.length;
+    if (depth > 0) {
+      o.children = node.children.map(function (c) {
+        // one unreadable child must not make the whole call fail
+        try { return serialize(c, depth - 1); }
+        catch (e) { return { id: c.id, name: c.name, type: c.type, error: String((e && e.message) || e) }; }
+      });
+    } else o.childCount = node.children.length;
   }
   return o;
 }
@@ -696,6 +839,38 @@ var handlers = {
     return serialize(node, depth);
   },
 
+  // Direct children of a page or node: id, name, type, position and size. With no id: the current
+  // page; with pageName: that page (works for pages other than the one that is open).
+  list_children: async function (p) {
+    var node;
+    if (p.id) {
+      node = await getNode(p.id);
+    } else if (p.pageName) {
+      var pages = figma.root.children;
+      var wanted = String(p.pageName).toLowerCase();
+      node = pages.filter(function (pg) { return pg.name.toLowerCase() === wanted; })[0];
+      if (!node) {
+        throw new Error('Page "' + p.pageName + '" not found. Pages in this file: ' +
+          pages.map(function (pg) { return '"' + pg.name + '"'; }).join(", "));
+      }
+      if (typeof node.loadAsync === "function") await node.loadAsync();
+    } else {
+      node = figma.currentPage;
+    }
+    if (!("children" in node)) throw new Error("Node " + node.id + " (" + node.type + ") has no children");
+    return {
+      id: node.id, name: node.name, type: node.type,
+      children: node.children.map(function (c) {
+        var o = { id: c.id, name: c.name, type: c.type };
+        if ("x" in c) { o.x = round(c.x); o.y = round(c.y); }
+        if ("width" in c) { o.width = round(c.width); o.height = round(c.height); }
+        if ("visible" in c && c.visible === false) o.visible = false;
+        if ("children" in c) o.childCount = c.children.length;
+        return o;
+      }),
+    };
+  },
+
   create: async function (p) {
     if (!p.spec) throw new Error("spec is required");
     var parent = await getParent(p.parentId);
@@ -709,6 +884,7 @@ var handlers = {
     } finally {
       if (anim) restoreOpacity(anim); // never leave anything transparent, even on error
     }
+    placeAt(parent, root, p.index); // insert at a position instead of the end of the parent
     if (p.select !== false) {
       figma.currentPage.selection = [root];
       figma.viewport.scrollAndZoomIntoView([root]);
@@ -723,6 +899,8 @@ var handlers = {
       var newParent = await getParent(props.parentId);
       if (typeof props.index === "number") newParent.insertChild(props.index, node);
       else newParent.appendChild(node);
+    } else if (typeof props.index === "number" && node.parent) {
+      placeAt(node.parent, node, props.index); // reorder inside the current parent
     }
     await applyProps(node, props, false);
     return serialize(node, 0);
@@ -741,6 +919,7 @@ var handlers = {
     var node = await getNode(p.id);
     var copy = node.clone();
     if (p.parentId) (await getParent(p.parentId)).appendChild(copy);
+    if (copy.parent) placeAt(copy.parent, copy, p.index); // no-op without index
     if (typeof p.x === "number") copy.x = p.x;
     if (typeof p.y === "number") copy.y = p.y;
     return serialize(copy, 0);
@@ -778,6 +957,16 @@ var handlers = {
     if (!("exportAsync" in node)) throw new Error("Node " + p.id + " cannot be exported");
     var format = p.format || "PNG";
     var scale = p.scale || 1;
+    if (format === "SVG") {
+      // vector export: text becomes outlines unless outlineText is false, so the shape matches the design
+      var svg = await node.exportAsync({
+        format: "SVG_STRING",
+        svgOutlineText: p.outlineText !== false,
+        svgIdAttribute: !!p.includeIds,
+        svgSimplifyStroke: true,
+      });
+      return { svg: svg, name: node.name, width: Math.round(node.width), height: Math.round(node.height) };
+    }
     var bytes = await node.exportAsync({ format: format, constraint: { type: "SCALE", value: scale } });
     return {
       base64: figma.base64Encode(bytes),
@@ -812,7 +1001,7 @@ figma.ui.onmessage = async function (msg) {
     var handler = handlers[msg.command];
     if (!handler) throw new Error("Unknown command: " + msg.command);
     var result = await handler(msg.params || {});
-    figma.ui.postMessage({ id: msg.id, ok: true, result: result });
+    figma.ui.postMessage({ id: msg.id, ok: true, result: clean(result) });
   } catch (e) {
     figma.ui.postMessage({ id: msg.id, ok: false, error: String((e && e.message) || e) });
   }

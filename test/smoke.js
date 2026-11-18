@@ -2,6 +2,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import WebSocket from "ws";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import assert from "node:assert/strict";
 
 const PORT = 3977;
@@ -18,7 +21,7 @@ const tools = (await client.listTools()).tools.map((t) => t.name).sort();
 console.log("tools:", tools.join(", "));
 assert.deepEqual(tools, [
   "figma_clone", "figma_combine_variants", "figma_create", "figma_delete", "figma_export", "figma_get_node",
-  "figma_get_selection", "figma_get_slots", "figma_list_variables", "figma_rebind_variables", "figma_select", "figma_set_slot", "figma_status", "figma_update",
+  "figma_get_selection", "figma_get_slots", "figma_list_children", "figma_list_variables", "figma_rebind_variables", "figma_select", "figma_set_slot", "figma_status", "figma_update",
 ]);
 
 // 1) no plugin connected -> clear error
@@ -35,6 +38,9 @@ const seen = [];
 ws.on("message", (raw) => {
   const m = JSON.parse(raw.toString());
   seen.push(m);
+  if (m.command === "export" && m.params.format === "SVG") {
+    return ws.send(JSON.stringify({ id: m.id, ok: true, result: { svg: '<svg width="10" height="10"><path d="M0 0"/></svg>', name: "OVO", width: 10, height: 10 } }));
+  }
   if (m.command === "export") {
     return ws.send(JSON.stringify({ id: m.id, ok: true, result: { base64: "iVBORw0KGgo=", mimeType: "image/png", name: "Card", width: 10, height: 10 } }));
   }
@@ -79,6 +85,34 @@ r = await client.callTool({ name: "figma_export", arguments: { id: "1:3", scale:
 assert.equal(r.content[0].type, "image");
 assert.equal(r.content[0].mimeType, "image/png");
 console.log("ok: export returns image");
+
+// SVG export: text comes back as text, savePath writes a file, bad combinations are rejected
+r = await client.callTool({ name: "figma_export", arguments: { id: "1:3", format: "SVG" } });
+assert.notEqual(r.isError, true);
+assert.ok(r.content.every((c) => c.type === "text"));
+assert.match(r.content.map((c) => c.text).join("\n"), /<svg width="10"/);
+const svgDir = fs.mkdtempSync(path.join(os.tmpdir(), "figma-svg-"));
+const svgPath = path.join(svgDir, "nested", "ovo.svg");
+r = await client.callTool({ name: "figma_export", arguments: { id: "1:3", format: "SVG", savePath: svgPath } });
+assert.notEqual(r.isError, true, r.content[0].text);
+assert.match(fs.readFileSync(svgPath, "utf8"), /^<svg/);
+assert.match(r.content[0].text, /ovo\.svg/);
+r = await client.callTool({ name: "figma_export", arguments: { id: "1:3", format: "SVG", savePath: path.join(svgDir, "x.png") } });
+assert.equal(r.isError, true); assert.match(r.content[0].text, /\.svg/);
+r = await client.callTool({ name: "figma_export", arguments: { id: "1:3", format: "PNG", savePath: svgPath } });
+assert.equal(r.isError, true);
+fs.rmSync(svgDir, { recursive: true, force: true });
+console.log("ok: export SVG + savePath");
+
+// index and list_children pass through
+r = await client.callTool({ name: "figma_create", arguments: { spec: { type: "TEXT", characters: "h" }, parentId: "1:2", index: 2 } });
+assert.equal(JSON.parse(r.content[0].text).params.index, 2);
+r = await client.callTool({ name: "figma_clone", arguments: { id: "1:3", index: 0 } });
+assert.equal(JSON.parse(r.content[0].text).params.index, 0);
+r = await client.callTool({ name: "figma_list_children", arguments: { pageName: "Web Flow" } });
+assert.equal(JSON.parse(r.content[0].text).echo, "list_children");
+assert.equal(JSON.parse(r.content[0].text).params.pageName, "Web Flow");
+console.log("ok: index + list_children pass through");
 
 r = await client.callTool({ name: "figma_delete", arguments: { ids: ["1:3"] } });
 assert.equal(r.isError, true);

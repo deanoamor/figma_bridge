@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer, WebSocket } from "ws";
 import { z } from "zod";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 
 const PORT = Number(process.env.FIGMA_BRIDGE_PORT || 3055);
@@ -181,8 +181,9 @@ startBridge();
 const mcp = new McpServer({ name: "figma-claude-bridge", version: "1.0.0" });
 
 // ------------------------------------------------------------- image loading
-// IMAGE fills may give `url` (http/https) or `path` (a file on this computer). The server reads
-// the bytes and hands them to the plugin as base64, since the plugin itself has no network/file access.
+// IMAGE fills may give `url` (http/https, or a data: URI), `path` (a file on this computer) or `base64`
+// (the bytes themselves, e.g. from a sandbox that cannot reach this computer's disks). The server reads
+// and checks the bytes and hands them to the plugin as base64, since the plugin has no network/file access.
 const MAX_IMAGE_BYTES = Number(process.env.FIGMA_BRIDGE_MAX_IMAGE_MB || 12) * 1024 * 1024;
 
 function sniffImage(buf) {
@@ -192,9 +193,26 @@ function sniffImage(buf) {
   return null;
 }
 
+// base64 text (optionally a "data:image/png;base64,..." URI) -> checked Buffer
+function decodeBase64Image(text, label) {
+  const m = /^data:[^,]*?(;base64)?,/i.exec(text);
+  let data = text;
+  if (m) {
+    if (!m[1]) throw new Error(`${label}: only base64 data: URIs are supported (data:image/png;base64,...)`);
+    data = text.slice(m[0].length);
+  }
+  data = data.replace(/\s+/g, "");
+  if (!/^[A-Za-z0-9+/_-]*={0,2}$/.test(data) || data.length < 8) {
+    throw new Error(`${label}: not valid base64 image data`);
+  }
+  return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+}
+
 async function loadImage(src) {
   let buf;
-  if (/^https?:\/\//i.test(src)) {
+  if (/^data:/i.test(src)) {
+    buf = decodeBase64Image(src, "Image data: URI");
+  } else if (/^https?:\/\//i.test(src)) {
     let res;
     try {
       res = await fetch(src, { signal: AbortSignal.timeout(20000), redirect: "follow" });
@@ -214,14 +232,14 @@ async function loadImage(src) {
     if (info.size > MAX_IMAGE_BYTES) throw new Error(`Image is too large (${Math.round(info.size / 1048576)} MB, limit ${MAX_IMAGE_BYTES / 1048576} MB): ${src}`);
     buf = await readFile(file);
   }
-  if (buf.length > MAX_IMAGE_BYTES) throw new Error(`Image is too large (limit ${MAX_IMAGE_BYTES / 1048576} MB): ${src}`);
+  if (buf.length > MAX_IMAGE_BYTES) throw new Error(`Image is too large (limit ${MAX_IMAGE_BYTES / 1048576} MB): ${src.slice(0, 80)}`);
   if (!sniffImage(buf)) {
-    throw new Error(`Unsupported image format: ${src}. Figma accepts PNG, JPEG or GIF; convert WebP/SVG/other formats first.`);
+    throw new Error(`Unsupported image format: ${src.slice(0, 80)}. Figma accepts PNG, JPEG or GIF; convert WebP/SVG/other formats first.`);
   }
   return buf.toString("base64");
 }
 
-// Deep-walk any params object and replace IMAGE paints that have url/path with base64.
+// Deep-walk any params object and replace IMAGE paints that have url/path/base64 with checked base64.
 async function resolveImages(value, cache = new Map()) {
   if (Array.isArray(value)) {
     const out = [];
@@ -231,7 +249,15 @@ async function resolveImages(value, cache = new Map()) {
   if (value && typeof value === "object") {
     const out = {};
     for (const [k, v] of Object.entries(value)) out[k] = await resolveImages(v, cache);
-    if (out.type === "IMAGE" && !out.base64 && (out.url || out.path)) {
+    if (out.type === "IMAGE" && typeof out.base64 === "string") {
+      // raw bytes sent by the caller: validate them like any other source (format and size)
+      const raw = out.base64;
+      const key = "b64:" + raw.length + ":" + raw.slice(0, 64) + raw.slice(-32);
+      if (!cache.has(key)) cache.set(key, loadImage(raw.startsWith("data:") ? raw : "data:;base64," + raw));
+      out.base64 = await cache.get(key);
+      delete out.url;
+      delete out.path;
+    } else if (out.type === "IMAGE" && (out.url || out.path)) {
       const src = String(out.url || out.path);
       if (!cache.has(src)) cache.set(src, loadImage(src));
       out.base64 = await cache.get(src);
@@ -257,11 +283,17 @@ const wrap = (command, mapParams = (p) => p) => async (params) => {
 
 const NODE_SPEC_DOC = `
 Node spec (JSON object). Common fields:
-- type: FRAME | COMPONENT | RECTANGLE | ELLIPSE | TEXT | LINE | POLYGON | STAR  (default FRAME). COMPONENT is a frame that can be combined into variants with figma_combine_variants.
+- type: FRAME | COMPONENT | RECTANGLE | ELLIPSE | TEXT | LINE | POLYGON | STAR | SVG  (default FRAME). COMPONENT is a frame that can be combined into variants with figma_combine_variants.
+  SVG imports vector artwork (e.g. an icon): {type:"SVG", svg:"<svg ...>...</svg>", name?, x?, y?, width?, height?}. It creates a frame containing editable vectors; use parentId on figma_create to drop it into a slot.
 - name, x, y, width, height, rotation, opacity (0-1), visible
-- fills: "#RRGGBB" | "#RRGGBBAA" | [{type:"SOLID",color:"#hex",opacity?}] | [{type:"GRADIENT_LINEAR",stops:[{position:0,color:"#hex"},...],angle?:deg}] | "none"
-- image fill: fills:[{type:"IMAGE", url:"https://..." | path:"D:/foto/a.png" | fromNodeId:"12:34" | imageHash:"...", scaleMode:"FILL"|"FIT"|"CROP"|"TILE" (default FILL), opacity?}]
+- fills: "#RRGGBB" | "#RRGGBBAA" | [{type:"SOLID",color:"#hex",opacity?}] | [{type:"GRADIENT_LINEAR",stops:[{position:0,color:"#hex"},...], direction|cssAngle|angle}] | "none"
+  Linear gradient direction (pick ONE): direction:"to right"|"to bottom"|"to bottom right"|... (like CSS), or cssAngle:deg (CSS convention: 0 = to top, 90 = to right, 180 = to bottom),
+  or angle:deg (0 = left to right, 90 = top to bottom, 180 = right to left, 270 = bottom to top; clockwise; default 0).
+  Example: a hero fading from dark at the top to transparent at the bottom: {type:"GRADIENT_LINEAR", direction:"to bottom", stops:[{position:0,color:"#000000CC"},{position:1,color:"#00000000"}]}.
+  figma_get_node returns gradients as {type, angle, stops} in the same convention as angle.
+- image fill: fills:[{type:"IMAGE", url:"https://..." | path:"D:/foto/a.png" | base64:"..." | fromNodeId:"12:34" | imageHash:"...", scaleMode:"FILL"|"FIT"|"CROP"|"TILE" (default FILL), opacity?}]
   Put it on a RECTANGLE/ELLIPSE/FRAME (e.g. a rectangle with cornerRadius for a rounded photo). PNG, JPEG or GIF only, max 12 MB.
+  base64 (or a "data:image/png;base64,..." URI in url) sends the bytes themselves, for callers that cannot reach this computer's folders. Keep it small (a few hundred KB) since the data passes through the conversation.
   fromNodeId reuses the first image of an existing node (e.g. a photo from the source slot, see figma_get_slots content.images).
   The same fills format works in figma_update to swap an image. Fills can mix, e.g. [image, gradient overlay].
 - variables (design tokens): refer to a local Figma variable as "collection/name", e.g. "light/primary", "core/radius/md" (the variable name keeps its own slashes).
@@ -270,12 +302,15 @@ Node spec (JSON object). Common fields:
   Works in figma_create and figma_update (see figma_rebind_variables to switch a copy to another collection). Unknown names fail with similar suggestions; figma_get_node shows bindings as "variable" on paints and "bound" on the node.
 - strokes: same format as fills (solid/gradient only); strokeWeight; strokeAlign: INSIDE|OUTSIDE|CENTER
 - cornerRadius (number) or topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius
-- effects: [{type:"DROP_SHADOW"|"INNER_SHADOW",color:"#hex",opacity?,x,y,blur,spread?}] or [{type:"LAYER_BLUR",blur}]
+- effects: [{type:"DROP_SHADOW"|"INNER_SHADOW",color:"#hex",opacity?,x,y,blur,spread?}] or [{type:"LAYER_BLUR",blur}]. figma_get_node returns effects in this same format.
 - clipsContent (frames)
 Auto layout (frames): layoutMode "HORIZONTAL"|"VERTICAL"|"NONE", itemSpacing, padding (all sides) or paddingTop/Right/Bottom/Left,
   primaryAxisAlignItems MIN|CENTER|MAX|SPACE_BETWEEN, counterAxisAlignItems MIN|CENTER|MAX|BASELINE,
   layoutWrap "WRAP"|"NO_WRAP", primaryAxisSizingMode / counterAxisSizingMode "FIXED"|"AUTO".
+  A new auto-layout frame HUGS its content on every axis you do not size (no width/height, layoutSizing* or *AxisSizingMode); give width/height or layoutSizing "FILL" to override.
 Child sizing inside an auto-layout parent: layoutSizingHorizontal / layoutSizingVertical "FIXED"|"HUG"|"FILL", layoutGrow (0|1), layoutAlign.
+  layoutPositioning:"ABSOLUTE" takes the child out of the flow so x/y place it freely inside the parent (e.g. a badge or an image overlapping a card); the parent must be auto layout. x/y of the result are returned. Optional constraints:{horizontal,vertical} (MIN|CENTER|MAX|STRETCH|SCALE).
+Order: figma_create and figma_clone accept index (0 = first child) to insert at a position instead of the end; figma_update accepts index to reorder inside the current parent (or with parentId to move).
 Text: characters, fontSize, fontFamily (default "Inter"), fontStyle (default "Regular", e.g. "Bold", "Semi Bold"),
   textAlignHorizontal LEFT|CENTER|RIGHT|JUSTIFIED, textAlignVertical TOP|CENTER|BOTTOM, lineHeight (px number), letterSpacing (px number),
   textAutoResize "WIDTH_AND_HEIGHT"|"HEIGHT"|"NONE", textColor (shortcut for fills on TEXT).
@@ -388,13 +423,30 @@ mcp.registerTool(
 mcp.registerTool(
   "figma_get_node",
   {
-    description: "Get a node by id (e.g. '12:34'), including its properties and children up to `depth`. Use no id for the current page.",
+    description:
+      "Get a node by id (e.g. '12:34'), including its properties (fills, strokes, effects, auto layout, text, variable bindings) and children up to `depth`. " +
+      "Use no id for the current page. To just see what is on a page, figma_list_children is lighter.",
     inputSchema: {
       id: z.string().optional().describe("Node id. Omit for the current page."),
       depth: z.number().int().min(0).max(6).optional().describe("Child levels to include (default 2)"),
     },
   },
   wrap("get_node")
+);
+
+mcp.registerTool(
+  "figma_list_children",
+  {
+    description:
+      "List the direct children of a page or node: id, name, type, x, y, width, height, childCount. " +
+      "No arguments = the current page; pageName = another page by name; id = any node (a page id also works). " +
+      "Use it to find ids before figma_get_node, figma_update or figma_clone.",
+    inputSchema: {
+      id: z.string().optional().describe("Node or page id"),
+      pageName: z.string().optional().describe("Page name (case-insensitive), e.g. 'Web Flow'"),
+    },
+  },
+  wrap("list_children")
 );
 
 mcp.registerTool(
@@ -405,6 +457,7 @@ mcp.registerTool(
     inputSchema: {
       spec: z.record(z.any()).describe("Node spec object, see description"),
       parentId: z.string().optional().describe("Parent node id. Default: current page."),
+      index: z.number().int().min(0).optional().describe("Position among the parent's children (0 = first). Default: end."),
       select: z.boolean().optional().describe("Select and zoom to the new node (default true)"),
       animate: z.boolean().optional().describe(
         "Play a build animation: nodes fade in one by one, in order, as if the design is being drawn live. " +
@@ -442,10 +495,11 @@ mcp.registerTool(
 mcp.registerTool(
   "figma_clone",
   {
-    description: "Duplicate a node. Optionally place the copy into another parent and/or offset it.",
+    description: "Duplicate a node. Optionally place the copy into another parent, at a position (index) and/or offset it.",
     inputSchema: {
       id: z.string(),
       parentId: z.string().optional(),
+      index: z.number().int().min(0).optional().describe("Position among the parent's children (0 = first). Default: next to the original, or the end of parentId."),
       x: z.number().optional(),
       y: z.number().optional(),
     },
@@ -465,16 +519,40 @@ mcp.registerTool(
 mcp.registerTool(
   "figma_export",
   {
-    description: "Export a node as an image so you can look at the result. Returns the image.",
+    description:
+      "Export a node. PNG/JPG returns an image so you can look at the result. SVG returns the vector markup as text " +
+      "(logos and icons you want to copy into code or into another design); pass savePath (a .svg file on this computer) " +
+      "to also write it to disk.",
     inputSchema: {
       id: z.string().describe("Node id to export"),
-      format: z.enum(["PNG", "JPG"]).optional().describe("Default PNG"),
-      scale: z.number().min(0.1).max(4).optional().describe("Default 1"),
+      format: z.enum(["PNG", "JPG", "SVG"]).optional().describe("Default PNG"),
+      scale: z.number().min(0.1).max(4).optional().describe("PNG/JPG only. Default 1"),
+      outlineText: z.boolean().optional().describe("SVG only: convert text to outlines (default true, so fonts are not needed). false keeps <text>."),
+      includeIds: z.boolean().optional().describe("SVG only: keep layer names as id attributes (default false)"),
+      savePath: z.string().optional().describe("SVG only: write the SVG to this .svg path, e.g. D:/proyek/img/logo.svg (folders are created)"),
     },
   },
   async (params) => {
     try {
-      const r = await callPlugin("export", params);
+      const { savePath, ...pluginParams } = params;
+      if (savePath && params.format !== "SVG") throw new Error("savePath only works with format SVG");
+      if (savePath && !/\.svg$/i.test(savePath)) throw new Error("savePath must end in .svg");
+      const r = await callPlugin("export", pluginParams);
+      if (typeof r.svg === "string") {
+        let saved = "";
+        if (savePath) {
+          const file = path.resolve(savePath);
+          await mkdir(path.dirname(file), { recursive: true });
+          await writeFile(file, r.svg, "utf8");
+          saved = `\nSaved to ${file}`;
+        }
+        return {
+          content: [
+            { type: "text", text: `Exported ${r.name} as SVG (${r.width}x${r.height}, ${r.svg.length} characters).${saved}` },
+            { type: "text", text: r.svg },
+          ],
+        };
+      }
       return {
         content: [
           { type: "image", data: r.base64, mimeType: r.mimeType },

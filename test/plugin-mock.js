@@ -6,14 +6,22 @@ import assert from "node:assert/strict";
 let idc = 0;
 const mixed = Symbol("mixed");
 const opacityLog = []; // every opacity write: { id, v }
+const textResizeLog = []; // every textAutoResize write: { id, v }
 class Node {
+  get x() { return this._x; }
+  set x(v) { if (this._inFlow()) return; this._x = v; }
+  get y() { return this._y; }
+  set y(v) { if (this._inFlow()) return; this._y = v; }
+  _inFlow() { return !!(this.parent && this.parent.layoutMode && this.parent.layoutMode !== "NONE" && this.layoutPositioning !== "ABSOLUTE"); }
+  get textAutoResize() { return this._tar; }
+  set textAutoResize(v) { this._tar = v; textResizeLog.push({ id: this.id, v }); }
   get opacity() { return this._o; }
   set opacity(v) { this._o = v; opacityLog.push({ id: this.id, v }); }
   constructor(type) {
     this.id = `1:${++idc}`; this.type = type; this.name = type; this.parent = null;
     this.x = 0; this.y = 0; this.width = 100; this.height = 100; this._o = 1; this.rotation = 0;
     this.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }]; this.strokes = []; this.strokeWeight = 1;
-    this.effects = []; this.cornerRadius = 0; this.visible = true; this.boundVariables = {};
+    this.constraints = { horizontal: "MIN", vertical: "MIN" }; this.effects = []; this.cornerRadius = 0; this.visible = true; this.boundVariables = {};
     if (type === "FRAME" || type === "COMPONENT" || type === "COMPONENT_SET") {
       this.children = []; this.layoutMode = "NONE"; this.itemSpacing = 0;
       this.paddingTop = this.paddingRight = this.paddingBottom = this.paddingLeft = 0;
@@ -22,6 +30,7 @@ class Node {
     if (type === "TEXT") { this.characters = ""; this.fontSize = 12; this.fontName = { family: "Inter", style: "Regular" }; this.textAutoResize = "WIDTH_AND_HEIGHT"; }
     if (type === "PAGE") { this.children = []; this.selection = []; }
   }
+  async loadAsync() { this.loaded = true; }
   appendChild(c) { if (c.parent) c.parent.children.splice(c.parent.children.indexOf(c), 1); c.parent = this; this.children.push(c); }
   insertChild(i, c) { this.appendChild(c); this.children.splice(i, 0, this.children.pop()); }
   resize(w, h) { this.width = w; this.height = h; }
@@ -38,18 +47,20 @@ class Node {
     if (variable) { this[field] = variable.value; this.boundVariables[field] = { type: "VARIABLE_ALIAS", id: variable.id }; }
     else delete this.boundVariables[field];
   }
-  async exportAsync() { return new Uint8Array([1, 2, 3]); }
+  async exportAsync(o) { return o && o.format === "SVG_STRING" ? `<svg xmlns="http://www.w3.org/2000/svg" data-outline="${o.svgOutlineText}" data-ids="${o.svgIdAttribute}"><path d="M0 0"/></svg>` : new Uint8Array([1, 2, 3]); }
 }
 const nodes = new Map();
 const reg = (n) => (nodes.set(n.id, n), n);
 const page = reg(new Node("PAGE")); page.name = "Page 1";
+const page2 = reg(new Node("PAGE")); page2.name = "Web Flow";
 const sent = [];
 const fontsLoaded = [];
 const figma = {
-  mixed, currentPage: page, root: { name: "Test file", children: [page] },
+  mixed, currentPage: page, root: { name: "Test file", children: [page, page2] },
   viewport: { scrollAndZoomIntoView() {} },
   createFrame: () => reg(new Node("FRAME")), createComponent: () => reg(new Node("COMPONENT")), createRectangle: () => reg(new Node("RECTANGLE")),
   createEllipse: () => reg(new Node("ELLIPSE")), createText: () => reg(new Node("TEXT")),
+  createNodeFromSvg: (svg) => { const n = reg(new Node("FRAME")); n.name = "svg"; n.svgSource = svg; return n; },
   createLine: () => reg(new Node("LINE")), createPolygon: () => reg(new Node("POLYGON")), createStar: () => reg(new Node("STAR")),
   getNodeByIdAsync: async (id) => nodes.get(id) || null,
   loadFontAsync: async (f) => { if (f.family === "Nope") throw new Error("x"); fontsLoaded.push(`${f.family} ${f.style}`); },
@@ -434,5 +445,186 @@ assert.equal(JSON.stringify(lightCol.variables), JSON.stringify([
   { id: "V:5", name: "ring", type: "COLOR", hasDescription: false },
 ]));
 console.log("ok: list_variables");
+
+// ======================= improvements from real use (phase 1)
+{
+  const make = (spec, params = {}) => call("create", { spec, animate: false, ...params });
+  const J = (v) => JSON.stringify(v); // vm objects are cross-realm: compare through JSON
+
+  // SVG node, and exporting a node as SVG
+  r = await make({ type: "SVG", name: "OVO", svg: '<svg viewBox="0 0 10 10"><path d="M0 0"/></svg>' });
+  assert.equal(r.ok, true, r.error);
+  const svgNode = nodes.get(r.result.rootId);
+  assert.match(svgNode.svgSource, /<svg/);
+  r = await make({ type: "SVG" });
+  assert.equal(r.ok, false); assert.match(r.error, /needs spec.svg/);
+  r = await call("export", { id: svgNode.id, format: "SVG" });
+  assert.equal(r.ok, true, r.error);
+  assert.match(r.result.svg, /^<svg/); assert.equal(r.result.base64, undefined);
+  assert.match(r.result.svg, /data-outline="true"/); assert.match(r.result.svg, /data-ids="false"/);
+  r = await call("export", { id: svgNode.id, format: "SVG", outlineText: false, includeIds: true });
+  assert.match(r.result.svg, /data-outline="false"/); assert.match(r.result.svg, /data-ids="true"/);
+  r = await call("export", { id: svgNode.id });
+  assert.equal(r.result.mimeType, "image/png"); // PNG unchanged
+  console.log("ok: SVG node + export SVG");
+
+  // effects are readable, in the same format figma_create takes
+  const fx = [
+    { type: "DROP_SHADOW", color: "#112233", opacity: 0.3, x: 1, y: 2, blur: 8, spread: 1 },
+    { type: "INNER_SHADOW", color: "#000000", opacity: 0.25, x: 0, y: 1, blur: 2, spread: 0 },
+    { type: "LAYER_BLUR", blur: 4 },
+  ];
+  r = await make({ type: "RECTANGLE", effects: fx });
+  const fxId = r.result.rootId;
+  r = await call("get_node", { id: fxId, depth: 0 });
+  assert.equal(J(r.result.effects), J(fx));
+  r = await call("update", { id: fxId, props: { effects: [] } });
+  r = await call("get_node", { id: fxId, depth: 0 });
+  assert.equal(r.result.effects, undefined);
+  console.log("ok: effects round trip");
+
+  // index on create / clone / update
+  r = await make({ type: "FRAME", name: "List", layoutMode: "VERTICAL", children: ["A", "B", "C"].map((n) => ({ type: "TEXT", name: n, characters: n })) });
+  const list = nodes.get(r.result.rootId);
+  const order = () => list.children.map((c) => c.name).join(",");
+  r = await make({ type: "TEXT", name: "X", characters: "x" }, { parentId: list.id, index: 1 });
+  assert.equal(order(), "A,X,B,C");
+  const xId = r.result.rootId;
+  r = await make({ type: "TEXT", name: "Y", characters: "y" }, { parentId: list.id, index: 0 });
+  assert.equal(order(), "Y,A,X,B,C");
+  const yId = r.result.rootId;
+  r = await make({ type: "TEXT", name: "Z", characters: "z" }, { parentId: list.id, index: 99 });
+  assert.equal(order(), "Y,A,X,B,C,Z"); // clamped to the end
+  r = await call("clone", { id: xId, index: 0 });
+  assert.equal(r.ok, true, r.error); assert.equal(list.children[0].id, r.result.id);
+  r = await call("delete", { ids: [r.result.id] });
+  r = await call("update", { id: yId, props: { index: 3 } });
+  assert.equal(list.children.indexOf(nodes.get(yId)), 3);
+  r = await call("update", { id: yId, props: { index: 0 } });
+  assert.equal(list.children[0].id, yId);
+  // Figma's insertChild may count the moved node (index before removal): the result must still be the requested index
+  const realInsert = Node.prototype.insertChild;
+  Node.prototype.insertChild = function (i, c) {
+    const before = this.children.indexOf(c);
+    this.appendChild(c); const moved = this.children.pop();
+    this.children.splice(before >= 0 && before < i ? i - 1 : i, 0, moved);
+  };
+  r = await call("update", { id: yId, props: { index: 3 } });
+  Node.prototype.insertChild = realInsert;
+  assert.equal(list.children.indexOf(nodes.get(yId)), 3, "index is correct even with the other insertChild semantics");
+  console.log("ok: index on create / clone / update");
+
+  // text is re-measured after width / font changes, and the auto-resize mode is restored
+  r = await make({ type: "TEXT", name: "Title", characters: "Judul yang panjang", fontSize: 20, width: 200 });
+  const title = nodes.get(r.result.rootId);
+  textResizeLog.length = 0;
+  r = await call("update", { id: title.id, props: { width: 300 } });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(J(textResizeLog.filter((e) => e.id === title.id).map((e) => e.v)), J(["HEIGHT", "NONE", "HEIGHT"]));
+  textResizeLog.length = 0;
+  r = await call("update", { id: title.id, props: { fontSize: 18 } });
+  assert.equal(J(textResizeLog.map((e) => e.v)), J(["NONE", "HEIGHT"]));
+  assert.equal(title.textAutoResize, "HEIGHT");
+  title.textAutoResize = "NONE"; textResizeLog.length = 0;
+  r = await call("update", { id: title.id, props: { fontSize: 16 } });
+  assert.equal(textResizeLog.length, 0, "fixed-size text is left alone");
+  console.log("ok: text re-measured after update");
+
+  // new auto-layout frames hug unless sized
+  r = await make({ type: "FRAME", layoutMode: "HORIZONTAL", children: [{ type: "TEXT", characters: "a" }] });
+  let f1 = nodes.get(r.result.rootId);
+  assert.equal(f1.layoutSizingHorizontal, "HUG"); assert.equal(f1.layoutSizingVertical, "HUG");
+  r = await make({ type: "FRAME", layoutMode: "VERTICAL", width: 300 });
+  f1 = nodes.get(r.result.rootId);
+  assert.equal(f1.layoutSizingHorizontal, "FIXED"); assert.equal(f1.layoutSizingVertical, "HUG");
+  assert.equal(f1.width, 300);
+  r = await make({ type: "FRAME", layoutMode: "HORIZONTAL", primaryAxisSizingMode: "FIXED" });
+  f1 = nodes.get(r.result.rootId);
+  assert.equal(f1.layoutSizingHorizontal, "FIXED"); assert.equal(f1.layoutSizingVertical, "HUG");
+  r = await make({ type: "FRAME", layoutMode: "VERTICAL", width: 500, children: [
+    { type: "FRAME", name: "row", layoutMode: "HORIZONTAL", layoutSizingHorizontal: "FILL", children: [{ type: "TEXT", characters: "x" }] },
+    { type: "FRAME", name: "pill", layoutMode: "HORIZONTAL", padding: 8, children: [{ type: "TEXT", characters: "tag" }] },
+  ] });
+  const col = nodes.get(r.result.rootId);
+  assert.equal(col.children[0].layoutSizingHorizontal, "FILL"); assert.equal(col.children[0].layoutSizingVertical, "HUG");
+  assert.equal(col.children[1].layoutSizingHorizontal, "HUG"); assert.equal(col.children[1].layoutSizingVertical, "HUG");
+  r = await make({ type: "FRAME", name: "plain", width: 120 });
+  assert.equal(nodes.get(r.result.rootId).width, 120); // no layoutMode: untouched
+  console.log("ok: auto-layout frames hug by default");
+
+  // gradient direction: direction / cssAngle / angle, readable back
+  const stops = [{ position: 0, color: "#000000CC" }, { position: 1, color: "#00000000" }];
+  const gradient = async (g) => {
+    const made = await make({ type: "RECTANGLE", fills: [{ type: "GRADIENT_LINEAR", stops, ...g }] });
+    assert.equal(made.ok, true, made.error);
+    return (await call("get_node", { id: made.result.rootId, depth: 0 })).result.fills[0];
+  };
+  const cases = [
+    [{ direction: "to right" }, 0], [{ direction: "to bottom" }, 90], [{ direction: "to left" }, 180], [{ direction: "to top" }, 270],
+    [{ direction: "to bottom right" }, 45], [{ direction: "left top" }, 225], [{ direction: "to top right" }, 315],
+    [{ cssAngle: 0 }, 270], [{ cssAngle: 90 }, 0], [{ cssAngle: 180 }, 90], [{ cssAngle: 270 }, 180], [{ cssAngle: 135 }, 45],
+    [{ angle: 90 }, 90], [{}, 0],
+  ];
+  for (const [g, expected] of cases) {
+    const f = await gradient(g);
+    assert.equal(f.angle, expected, J(g) + " -> " + f.angle);
+  }
+  const gf = await gradient({ direction: "to bottom" });
+  assert.equal(gf.type, "GRADIENT_LINEAR"); assert.equal(J(gf.stops), J([{ position: 0, color: "#000000CC" }, { position: 1, color: "#00000000" }]));
+  r = await make({ type: "RECTANGLE", fills: [{ type: "GRADIENT_LINEAR", stops, direction: "diagonal" }] });
+  assert.equal(r.ok, false); assert.match(r.error, /Unknown gradient direction/);
+  console.log("ok: gradient direction (direction / cssAngle / angle) and read back");
+
+  // absolute positioning inside an auto-layout parent: x/y must land
+  r = await make({ type: "FRAME", name: "Hero", layoutMode: "VERTICAL", width: 400, height: 300, children: [
+    { type: "TEXT", name: "flow", characters: "flow" },
+    { type: "RECTANGLE", name: "Laptop", width: 80, height: 50, layoutPositioning: "ABSOLUTE", x: 300, y: 220, constraints: { horizontal: "MAX", vertical: "MAX" } },
+  ] });
+  assert.equal(r.ok, true, r.error);
+  const laptop = nodes.get(r.result.created[2].id);
+  assert.equal(laptop.layoutPositioning, "ABSOLUTE");
+  assert.equal(laptop.x, 300); assert.equal(laptop.y, 220);
+  assert.equal(J(laptop.constraints), J({ horizontal: "MAX", vertical: "MAX" }));
+  r = await call("get_node", { id: laptop.id, depth: 0 });
+  assert.equal(r.result.x, 300); assert.equal(r.result.y, 220); assert.equal(r.result.layoutPositioning, "ABSOLUTE");
+  const flowText = nodes.get(r.result.id) && nodes.get(laptop.parent.children[0].id);
+  r = await call("update", { id: flowText.id, props: { layoutPositioning: "ABSOLUTE", x: 10, y: 20 } });
+  assert.equal(r.ok, true, r.error); assert.equal(flowText.x, 10); assert.equal(flowText.y, 20);
+  r = await make({ type: "FRAME", children: [{ type: "RECTANGLE", layoutPositioning: "ABSOLUTE" }] });
+  assert.equal(r.ok, false); assert.match(r.error, /needs a parent with auto layout/);
+  console.log("ok: ABSOLUTE positioning returns x/y");
+
+  // get_node survives figma.mixed and an unreadable child; unknown ids explain how to find ids
+  r = await make({ type: "FRAME", name: "Weird", children: [{ type: "RECTANGLE", name: "ok" }, { type: "RECTANGLE", name: "bad" }] });
+  const weird = nodes.get(r.result.rootId);
+  weird.children[0].strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }];
+  weird.children[0].strokeWeight = mixed;
+  Object.defineProperty(weird.children[1], "fills", { get() { throw new Error("boom"); } });
+  r = await call("get_node", { id: weird.id, depth: 2 });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result.children[0].strokeWeight, "mixed");
+  assert.match(r.result.children[1].error, /boom/); assert.equal(r.result.children[1].name, "bad");
+  r = await call("get_node", { id: "9:99" });
+  assert.equal(r.ok, false); assert.match(r.error, /Node not found: 9:99/); assert.match(r.error, /figma_list_children/);
+  console.log("ok: get_node robust (mixed, unreadable child, helpful not-found)");
+
+  // list_children: current page, another page by name, by id
+  await make({ type: "FRAME", name: "On page 2" }, { parentId: page2.id });
+  r = await call("list_children", { pageName: "web flow" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result.name, "Web Flow"); assert.equal(r.result.children[0].name, "On page 2");
+  assert.equal(page2.loaded, true, "the page is loaded before its children are read");
+  assert.equal(r.result.children[0].type, "FRAME"); assert.equal(typeof r.result.children[0].width, "number");
+  r = await call("list_children", {});
+  assert.equal(r.result.name, "Page 1"); assert.ok(r.result.children.length > 3);
+  assert.ok(["id", "name", "type", "x", "y", "width", "height"].every((k) => k in r.result.children[0]));
+  r = await call("list_children", { id: page2.id });
+  assert.equal(r.result.children.length, 1);
+  r = await call("list_children", { pageName: "Nope" });
+  assert.equal(r.ok, false); assert.match(r.error, /Pages in this file: "Page 1", "Web Flow"/);
+  r = await call("list_children", { id: fxId });
+  assert.equal(r.ok, false); assert.match(r.error, /has no children/);
+  console.log("ok: list_children");
+}
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

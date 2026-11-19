@@ -124,7 +124,6 @@ const figma = {
   viewport: { scrollAndZoomIntoView() {} },
   createFrame: () => reg(new Node("FRAME")), createComponent: () => reg(new Node("COMPONENT")), createRectangle: () => reg(new Node("RECTANGLE")),
   createEllipse: () => reg(new Node("ELLIPSE")), createText: () => reg(new Node("TEXT")),
-  createNodeFromSvg: (svg) => { const n = reg(new Node("FRAME")); n.name = "svg"; n.svgSource = svg; return n; },
   createVector: () => reg(new Node("VECTOR")),
   _bool(op) {
     return (parts, parent, index) => {
@@ -159,7 +158,7 @@ const figma = {
   getLocalEffectStylesAsync: async () => effectStyles,
   getLocalTextStylesAsync: async () => textStyles,
   createTextStyle: () => { const s = { id: `T:${textStyles.length + 1}`, name: "", boundVars: {}, setBoundVariable(f, v) { if (!["fontSize", "lineHeight"].includes(f)) throw new Error("invalid field " + f); this.boundVars[f] = v.id; } }; textStyles.push(s); return s; },
-  createNodeFromSvg: (svg) => { svgImported.push(svg); const f = reg(new Node("FRAME")); f.name = "svg"; f.appendChild(reg(new Node("VECTOR"))); return f; },
+  createNodeFromSvg: (svg) => { svgImported.push(svg); const f = reg(new Node("FRAME")); f.name = "svg"; f.svgSource = svg; f.appendChild(reg(new Node("VECTOR"))); return f; },
   getLocalPaintStylesAsync: async () => [],
   createEffectStyle: () => { const s = { id: `S:${effectStyles.length + 1}`, name: "", effects: [], description: "" }; effectStyles.push(s); return s; },
   combineAsVariants(comps, parent) {
@@ -707,7 +706,7 @@ console.log("ok: description, text styles, effect colors");
   const svgNode = nodes.get(r.result.rootId);
   assert.match(svgNode.svgSource, /<svg/);
   r = await make({ type: "SVG" });
-  assert.equal(r.ok, false); assert.match(r.error, /needs spec.svg/);
+  assert.equal(r.ok, false); assert.match(r.error, /needs an "svg" string/);
   r = await call("export", { id: svgNode.id, format: "SVG" });
   assert.equal(r.ok, true, r.error);
   assert.match(r.result.svg, /^<svg/); assert.equal(r.result.base64, undefined);
@@ -895,7 +894,7 @@ console.log("ok: description, text styles, effect colors");
   assert.equal(vec.vectorPaths[0].windingRule, "EVENODD");
   assert.equal(vec.vectorPaths[0].data, "M 10 10 L 50 10 L 50 40 L 10 40 Z"); // H / V / relative h
   assert.equal(vec.vectorPaths[1].data, "M 0 0 C 0 10 10 10 10 0 C 10 -10 20 -10 20 0 Q 25 5 30 0 Q 35 -5 40 0"); // S and T reflect the last control point
-  assert.equal(vec.width, 80); assert.equal(vec.fills.length, 1, "strokes only: default fill untouched"); // the mock's own default white fill
+  assert.equal(vec.width, 80); assert.equal(vec.fills.length, 0, "strokes only: no fill added"); // a new vector starts without a fill
   r = await make({ type: "VECTOR", path: "M 0 0 l 10 10 5 0 z" });
   assert.equal(nodes.get(r.result.rootId).vectorPaths[0].data, "M 0 0 L 10 10 L 15 10 Z"); // implicit repeated lineto
   for (const [bad, re] of [["M 0 0 A 5 5 0 0 1 10 10", /arc.*SVG/], ["L 1 1", /start with M/], ["M 0 0 X 3", /Unknown path command|unexpected/], ["M 0", /malformed/], ["M 0 0 L #", /unexpected characters/]]) {

@@ -1,58 +1,55 @@
 # Figma Bridge (Claude Bridge)
 
-Plugin Figma + server MCP yang membuat **Claude bisa mendesain langsung di Figma**. Dibuat untuk pemakaian pribadi di komputer sendiri, memakai langganan Claude yang sudah ada (tidak perlu API key).
+A Figma plugin plus a local MCP server that lets **Claude design directly in Figma**. Built for personal use on your own computer, using your existing Claude subscription (no API key needed).
 
 ```
 Claude Desktop / Claude Code
         │  MCP (stdio)
         ▼
-  server/index.js  ──WebSocket (localhost:3055)──►  Plugin Figma (plugin/)
+  server/index.js  ──WebSocket (localhost:3055)──►  Figma plugin (plugin/)
                                                           │
                                                           ▼
                                                     Figma Plugin API
 ```
 
-Server hanya mendengarkan di `127.0.0.1`, jadi tidak terbuka ke jaringan.
+The server only listens on `127.0.0.1`, so it is not exposed to the network.
 
-> **English summary:** a Figma plugin plus a local MCP server that lets Claude (Claude Desktop or Claude Code) design directly in Figma: create and edit frames, text, auto layout, gradients, images, vectors, variables and components, import an HTML page as auto-layout frames, and export nodes as SVG/PNG. It talks to the plugin over a WebSocket on `127.0.0.1` only and needs no API key. Quick start: `npm install`, import `plugin/manifest.json` in Figma (Plugins → Development → Import plugin from manifest), add the server (`node server/index.js`) to your MCP client config, then open the plugin in Figma. The detailed guide below is in Indonesian. Requires Node.js 18+ and the Figma desktop app. Run `npm test` for the test suite.
->
 > **Unofficial project:** not affiliated with or endorsed by Figma or Anthropic. Claude can modify your Figma file, so try it on a copy first. Licensed under MIT, see [LICENSE](LICENSE).
 
+## Features
 
-## Fitur
+- **Create and edit designs**: frames, text, shapes, auto layout, gradients, shadows, rounded corners, and nested structures in a single command.
+- **Image fills**: from a file on your computer, a URL, base64, or copied from another node.
+- **HTML import**: turn a web page (HTML + CSS) into auto-layout frames in Figma.
+- **Vectors and booleans**: draw your own paths and combine shapes (union, subtract, intersect, exclude).
+- **Mixed text styles**: one text node with bold, colored, or underlined parts.
+- **Variables (tokens)**: create collections, modes, and variables from a list of tokens.
+- **SVG export**: take a logo or icon as SVG, optionally saved straight to a file.
+- **Build animation**: the design appears step by step, as if being drawn live.
+- **Two slots (Source → Target)**: pick a design that holds the information and a design to transform, then give Claude a brief.
+- **Claude can see the result**: export a node as an image, then fix it on its own.
 
-- **Buat dan ubah desain**: frame, teks, shape, auto layout, gradient, shadow, sudut bulat, struktur bertingkat dalam satu perintah.
-- **Fill gambar**: dari file di komputer, URL, base64, atau salin dari node lain.
-- **Impor dari HTML**: ubah halaman web (HTML + CSS) jadi frame auto layout di Figma.
-- **Vector dan boolean**: gambar path sendiri, gabungkan bentuk (union, subtract, intersect, exclude).
-- **Teks dengan gaya campuran**: satu teks berisi bagian tebal, berwarna, atau bergaris bawah.
-- **Variable (token)**: buat collection, mode, dan variable dari daftar token.
-- **Ekspor SVG**: ambil logo atau ikon sebagai SVG, bisa langsung disimpan ke file.
-- **Animasi build**: desain muncul bertahap seperti digambar langsung.
-- **Dua slot (Sumber → Target)**: pilih desain berisi informasi dan desain yang mau diubah, lalu beri brief lewat Claude.
-- **Claude bisa melihat hasilnya**: ekspor node jadi gambar, lalu memperbaiki sendiri.
+## Contents
 
-## Isi
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Advanced features](#advanced-features)
+- [Tool reference](#tool-reference)
+- [Stopping and updating](#stopping-and-updating)
+- [Troubleshooting](#troubleshooting)
+- [Development and tests](#development-and-tests)
+- [Security notes](#security-notes)
 
-- [Prasyarat](#prasyarat)
-- [Tutorial pemasangan](#tutorial-pemasangan)
-- [Cara pakai](#cara-pakai)
-- [Fitur lanjutan](#fitur-lanjutan)
-- [Referensi tool](#referensi-tool)
-- [Mematikan dan memperbarui](#mematikan-dan-memperbarui)
-- [Pemecahan masalah](#pemecahan-masalah)
-- [Pengembangan dan tes](#pengembangan-dan-tes)
-- [Catatan keamanan](#catatan-keamanan)
+## Prerequisites
 
-## Prasyarat
+- **Node.js 18 or newer** (check with `node -v`)
+- **The Figma desktop app**. Plugin development cannot be run from Figma in the browser.
+- **Claude Desktop** or **Claude Code** (either one is enough)
 
-- **Node.js 18 atau lebih baru** (cek dengan `node -v`)
-- **Aplikasi desktop Figma**. Plugin development tidak bisa dijalankan dari Figma di browser.
-- **Claude Desktop** atau **Claude Code** (salah satu cukup)
+## Installation
 
-## Tutorial pemasangan
-
-### 1. Ambil kode dan pasang dependensi
+### 1. Get the code and install dependencies
 
 ```bash
 git clone https://github.com/deanoamor/figma_bridge.git
@@ -60,18 +57,18 @@ cd figma_bridge
 npm install
 ```
 
-Pesan `npm audit` atau "new major version of npm" setelah `npm install` boleh diabaikan. Jangan jalankan `npm audit fix --force`.
+You can ignore the `npm audit` or "new major version of npm" messages after `npm install`. Do not run `npm audit fix --force`.
 
-Catat **path lengkap** ke `server/index.js`, misalnya `D:/figma_bridge/server/index.js`. Di Windows, tulis dengan garis miring `/` supaya tidak perlu menggandakan backslash.
+Note the **full path** to `server/index.js`, for example `D:/figma_bridge/server/index.js`. On Windows, write it with forward slashes `/` so you do not have to double the backslashes.
 
-### 2. Daftarkan server MCP ke Claude
+### 2. Register the MCP server with Claude
 
-Pilih salah satu.
+Pick one.
 
 **Claude Desktop**
 
-1. Buka **Settings → Desktop app**, scroll ke bawah ke baris **Extensions**, klik **Manage**. Di halaman itu, bagian **Local MCP servers**, klik **Edit config** (di versi lama menunya bernama **Developer**). Folder yang berisi `claude_desktop_config.json` akan terbuka; buka file itu dengan editor teks (Notepad/VS Code).
-2. Tambahkan blok `figma-bridge` (jika `mcpServers` sudah ada isinya, tambahkan saja di dalamnya):
+1. Open **Settings → Desktop app**, scroll down to the **Extensions** row and click **Manage**. On that page, in the **Local MCP servers** section, click **Edit config** (older versions call this menu **Developer**). The folder containing `claude_desktop_config.json` opens; open that file in a text editor (Notepad/VS Code).
+2. Add the `figma-bridge` block (if `mcpServers` already has entries, just add it inside):
 
 ```json
 {
@@ -84,8 +81,8 @@ Pilih salah satu.
 }
 ```
 
-3. Simpan, lalu **tutup Claude Desktop sepenuhnya**, termasuk dari system tray (klik kanan ikonnya → Quit), dan buka lagi.
-4. Cek di **Settings → Desktop app → Extensions → Manage → Local MCP servers**: `figma-bridge` harus berstatus *Running*.
+3. Save, then **quit Claude Desktop completely**, including from the system tray (right-click its icon → Quit), and open it again.
+4. Check **Settings → Desktop app → Extensions → Manage → Local MCP servers**: `figma-bridge` should show *Running*.
 
 **Claude Code**
 
@@ -93,223 +90,223 @@ Pilih salah satu.
 claude mcp add figma-bridge -- node D:/figma_bridge/server/index.js
 ```
 
-Ganti path sesuai lokasi kamu. Kalau perintah `claude` tidak dikenali, pasang dulu: `npm install -g @anthropic-ai/claude-code`.
+Change the path to match your location. If the `claude` command is not recognized, install it first: `npm install -g @anthropic-ai/claude-code`.
 
-### 3. Impor plugin ke Figma
+### 3. Import the plugin into Figma
 
-1. Buka aplikasi desktop Figma dan sebuah **file Design** (bukan FigJam).
+1. Open the Figma desktop app and a **Design** file (not FigJam).
 2. Menu **Plugins → Development → Import plugin from manifest...**
-3. Pilih `plugin/manifest.json` dari folder proyek ini.
+3. Choose `plugin/manifest.json` from this project folder.
 
-Impor cukup dilakukan sekali. Plugin tetap ada di menu Plugins → Development.
+You only need to import it once. The plugin stays in the Plugins → Development menu.
 
-### 4. Jalankan dan tes
+### 4. Run and test
 
-1. Di Figma: **Plugins → Development → Claude Bridge**. Jendela kecil muncul dengan titik **hijau** dan tulisan "Connected to Claude". **Biarkan jendela ini terbuka** selama Claude bekerja. Kalau ditutup, koneksi putus.
-2. Di chat Claude (satu chat saja), ketik:
+1. In Figma: **Plugins → Development → Claude Bridge**. A small window appears with a **green** dot and the text "Connected to Claude". **Keep this window open** while Claude works. If you close it, the connection is lost.
+2. In a Claude chat (just one chat), type:
 
-> Pakai figma_status untuk cek koneksi, lalu buat kartu profil sederhana 320x200 dengan nama dan tombol.
+> Use figma_status to check the connection, then build a simple 320x200 profile card with a name and a button.
 
-Kalau kartunya muncul di kanvas Figma, semuanya sudah jalan.
+If the card appears on the Figma canvas, everything works.
 
-## Cara pakai
+## Usage
 
-Claude bekerja lewat tool `figma_*`. Kamu cukup menulis brief biasa. Beberapa pola yang berguna:
+Claude works through the `figma_*` tools. You just write a normal brief. Some useful patterns:
 
-### Membuat desain dari nol
+### Creating a design from scratch
 
-> Buat halaman dashboard web profesional di Figma, frame 1440x1024. Sidebar kiri 240px, header dengan pencarian, 4 kartu KPI, grafik garis, dan tabel pesanan terbaru. Warna latar #F6F7F9, aksen #4F46E5, font Inter. Pakai auto layout, beri nama layer yang jelas, dan cek hasilnya dengan figma_export setelah tiap bagian besar.
+> Build a professional web dashboard page in Figma, a 1440x1024 frame. Left sidebar 240px, a header with search, 4 KPI cards, a line chart, and a table of recent orders. Background #F6F7F9, accent #4F46E5, font Inter. Use auto layout, give layers clear names, and check the result with figma_export after each big section.
 
-Tips: minta Claude membangun satu layar dalam **satu** panggilan `figma_create` dengan children bertingkat, lalu memeriksa dan memperbaikinya. Kalau hasilnya kurang pas, minta perbaikan spesifik ("jarak antar KPI terlalu rapat") dan jangan mengulang dari awal.
+Tip: ask Claude to build one screen in **one** `figma_create` call with nested children, then inspect and fix it. If the result is off, ask for a specific fix ("the spacing between the KPI cards is too tight") instead of starting over.
 
-### Dua slot: buat desain baru dari informasi yang ada
+### Two slots: build a new design from existing information
 
-Untuk kasus "ada desain berisi informasi, lalu bikin desain baru dari informasi itu".
+For the case "there is a design that holds the information, and I want a new design made from it".
 
-1. Pilih desain berisi informasi, lalu klik **Pakai seleksi** di baris *1 · Sumber informasi* pada jendela plugin.
-2. Pilih desain yang mau diubah (template, poster, kartu, dsb.), lalu klik **Pakai seleksi** di baris *2 · Target desain*.
-3. Tulis brief ke Claude, misalnya:
+1. Select the design that holds the information, then click **Use selection** on the *1 · Source* row of the plugin window.
+2. Select the design you want to transform (a template, poster, card, etc.), then click **Use selection** on the *2 · Target* row.
+3. Write a brief to Claude, for example:
 
-> Isi target dengan informasi dari sumber. Judul dan 3 poin utama saja, gaya lebih minimalis, warna brand jangan diubah.
+> Fill the target with the information from the source. Only the title and the 3 main points, a more minimalist style, do not change the brand colors.
 
-Claude membaca isi sumber (teks berurutan dari atas ke bawah, gambar, struktur) dan struktur target, **menggandakan target dulu** supaya aslinya aman (kecuali kamu minta ubah langsung), mengisi teks lewat id node (gaya font tetap terjaga), menambah atau menghapus baris bila jumlah item berbeda, lalu mengecek hasilnya dengan screenshot. Claude tidak mengarang informasi yang tidak ada di sumber dan melaporkan bagian yang tidak muat.
+Claude reads the source content (text in top-to-bottom order, images, structure) and the target structure, **duplicates the target first** so the original stays safe (unless you ask it to edit in place), fills in text by node id (keeping font styles), adds or removes rows if the number of items differs, then checks the result with a screenshot. Claude does not invent information that is not in the source and reports parts that do not fit.
 
-Satu slot bisa berisi beberapa node. Slot tersimpan di file Figma, jadi tetap ada saat plugin dibuka ulang.
+A slot can hold several nodes. Slots are saved in the Figma file, so they persist when the plugin is reopened.
 
-### Fill gambar
+### Image fills
 
-Rectangle, ellipse, dan frame bisa diberi gambar sebagai fill, saat dibuat maupun lewat `figma_update` untuk mengganti gambar.
+Rectangles, ellipses, and frames can get an image as a fill, both when created and via `figma_update` to replace the image.
 
-| Sumber | Contoh |
+| Source | Example |
 |---|---|
-| `path` | file di komputer: `D:/foto/sepatu.png` |
-| `url` | `https://contoh.com/foto.jpg` |
-| `fromNodeId` | pakai ulang gambar dari node lain di Figma |
+| `path` | a file on your computer: `D:/photos/shoe.png` |
+| `url` | `https://example.com/photo.jpg` |
+| `fromNodeId` | reuse the image from another node in Figma |
 
-`scaleMode`: `FILL` (default), `FIT`, `CROP`, `TILE`. Format PNG, JPEG, GIF, maksimal 12 MB (ubah dengan variabel lingkungan `FIGMA_BRIDGE_MAX_IMAGE_MB`). WebP dan SVG harus dikonversi dulu. Gambar bisa ditumpuk dengan fill lain, misalnya gradient gelap di atas foto.
+`scaleMode`: `FILL` (default), `FIT`, `CROP`, `TILE`. PNG, JPEG, and GIF formats, up to 12 MB (change it with the `FIGMA_BRIDGE_MAX_IMAGE_MB` environment variable). WebP and SVG must be converted first. Images can be stacked with other fills, for example a dark gradient over a photo.
 
-> Buat kartu produk 320x420. Di bagian atas ada foto dari D:/foto/sepatu.png (tinggi 240, sudut atas 16, mode FILL), lalu nama produk, harga, dan tombol Beli di bawahnya.
+> Build a 320x420 product card. At the top, a photo from D:/photos/shoe.png (height 240, top corners 16, FILL mode), then the product name, the price, and a Buy button below it.
 
-### Animasi build
+### Build animation
 
-Saat Claude membuat desain, node dimunculkan satu per satu dengan fade-in dari wadah ke isinya, sambil kanvas zoom ke area yang dibangun.
+When Claude builds a design, nodes appear one by one with a fade-in from container to contents, while the canvas zooms to the area being built.
 
-- Aktif/nonaktif dan kecepatan (Cepat / Normal / Lambat) diatur di jendela plugin dan diingat antar sesi.
-- Claude bisa menimpanya per panggilan (`animate`, `speed`), misalnya `animate: false` untuk edit massal.
-- Total animasi dibatasi sekitar 12 detik, jadi desain besar dipercepat otomatis.
-- Setelah selesai, semua node kembali ke opacity aslinya.
+- Enable/disable and speed (Fast / Normal / Slow) are set in the plugin window and remembered between sessions.
+- Claude can override them per call (`animate`, `speed`), for example `animate: false` for bulk edits.
+- Total animation time is capped at about 12 seconds, so large designs are sped up automatically.
+- When it finishes, all nodes return to their original opacity.
 
-## Fitur lanjutan
+## Advanced features
 
-Bagian ini berasal dari daftar perbaikan setelah bridge dipakai memindahkan halaman web ke Figma.
+This section comes from the list of improvements made after using the bridge to move a web page into Figma.
 
-### Impor dari HTML
+### HTML import
 
-`figma_import_html` membaca HTML + CSS dan membuat frame auto layout. Plugin merender halamannya di jendela tersembunyi (skrip di halaman tidak dijalankan), mengukur setiap kotak, lalu menerjemahkannya.
+`figma_import_html` reads HTML + CSS and creates auto-layout frames. The plugin renders the page in a hidden window (scripts on the page are not run), measures every box, and then translates it.
 
-> Impor D:/proyek/index.html lebar 1440 ke halaman ini. Hanya section `#pricing`.
+> Import D:/project/index.html at width 1440 into this page. Only the `#pricing` section.
 
-- Beri `htmlPath` (file di komputer) atau `html` (teks). Untuk `htmlPath`, stylesheet `<link>` dan gambar relatif dibaca dari folder yang sama. Untuk `html`, isi `baseDir` bila ada gambar relatif.
-- Didukung: flexbox, grid, alur blok biasa, padding, gap, radius, warna, gradient, border, shadow, teks (font, berat, ukuran, tinggi baris, rata, huruf besar), gaya campuran di dalam satu teks (`<b>`, `<a>`, `<span>`), `<img>`, background image, `<svg>` inline, `position: absolute`, tombol, input.
-- Tata letak diambil dari posisi hasil render: anak yang tersusun satu baris atau satu kolom jadi auto layout, grid jadi baris-baris, margin yang berbeda jadi frame `spacer` atau `margin`. Susunan lain diletakkan di koordinat absolut. `layout: "absolute"` memaksa semuanya absolut (persis seperti browser, tetapi tidak responsif).
-- `dryRun: true` hanya menampilkan hasil konversi tanpa membuat apa-apa. `width` mengatur lebar halaman (390 untuk tampilan mobile), `selector` memilih satu bagian.
-- Font dari CSS dipakai apa adanya. Font yang tidak ada di Figma diganti `fallbackFont` (default Inter) dan dilaporkan di `fontSubstitutions`. Ukur ulang teks bisa sedikit berbeda bila font itu tidak terpasang di komputermu.
-- Ini perkiraan, bukan salinan piksel demi piksel. Yang tidak diimpor dilaporkan di `warnings`: `::before`/`::after`, transform, border yang berbeda per sisi, penanda daftar (bullet), dan `backdrop-filter`.
+- Provide `htmlPath` (a file on your computer) or `html` (text). With `htmlPath`, `<link>` stylesheets and relative images are read from the same folder. With `html`, set `baseDir` if there are relative images.
+- Supported: flexbox, grid, normal block flow, padding, gap, radius, colors, gradients, borders, shadows, text (font, weight, size, line height, alignment, uppercase), mixed styles inside one text (`<b>`, `<a>`, `<span>`), `<img>`, background images, inline `<svg>`, `position: absolute`, buttons, inputs.
+- Layout is taken from the rendered positions: children arranged in one row or one column become auto layout, grids become rows, and uneven margins become `spacer` or `margin` frames. Other arrangements are placed at absolute coordinates. `layout: "absolute"` forces everything to absolute (exactly like the browser, but not responsive).
+- `dryRun: true` only shows the conversion result without creating anything. `width` sets the page width (390 for a mobile view), and `selector` picks one section.
+- Fonts from the CSS are used as they are. Fonts that do not exist in Figma are replaced by `fallbackFont` (default Inter) and reported in `fontSubstitutions`. Text re-measuring can differ slightly if that font is not installed on your computer.
+- This is an approximation, not a pixel-for-pixel copy. What is not imported is reported in `warnings`: `::before`/`::after`, transforms, per-side different borders, list markers (bullets), and `backdrop-filter`.
 
-### Vector dan boolean
+### Vectors and booleans
 
 ```
 { "type": "VECTOR", "path": "M 0 0 L 40 0 L 20 30 Z", "fills": "#2563EB", "width": 80, "height": 60 }
 ```
 
-Sintaks path SVG: `M L H V C S Q T Z`, absolut atau relatif. Busur (`A`) belum didukung; untuk bentuk dengan busur pakai node `SVG`. `figma_boolean` menggabungkan bentuk: `UNION`, `SUBTRACT` (bentuk di depan memotong bentuk di belakang), `INTERSECT`, `EXCLUDE`. `flatten: true` menjadikannya satu vector biasa.
+SVG path syntax: `M L H V C S Q T Z`, absolute or relative. Arcs (`A`) are not supported yet; for shapes with arcs use an `SVG` node. `figma_boolean` combines shapes: `UNION`, `SUBTRACT` (the front shape cuts the shape behind it), `INTERSECT`, `EXCLUDE`. `flatten: true` turns the result into a plain vector.
 
-### Teks dengan gaya campuran
+### Mixed text styles
 
 ```
 { "type": "TEXT", "fontSize": 20, "runs": [
-  { "text": "Hemat " },
+  { "text": "Save " },
   { "text": "30%", "fontStyle": "Bold", "color": "#E11D48", "fontSize": 28 }
 ] }
 ```
 
-Tiap `run` boleh memuat `fontSize`, `fontFamily`, `fontStyle`, `color`, `textDecoration`, `letterSpacing`, `lineHeight`. Alternatifnya `ranges: [{ "start": 0, "end": 5, ... }]` untuk menata sebagian dari `characters`. `figma_get_node` mengembalikan `runs` bila gayanya berbeda-beda.
+Each `run` may contain `fontSize`, `fontFamily`, `fontStyle`, `color`, `textDecoration`, `letterSpacing`, `lineHeight`. Alternatively `ranges: [{ "start": 0, "end": 5, ... }]` styles part of `characters`. `figma_get_node` returns `runs` when the styles differ.
 
-### Variable (token)
+### Variables (tokens)
 
-`figma_create_variables` membuat atau memperbarui collection, mode, dan variable dari satu daftar. Aman dijalankan ulang (dicocokkan lewat nama). Nilai per mode, dan alias ke variable lain ditulis `{ "alias": "core/blue/500" }`.
+`figma_create_variables` creates or updates collections, modes, and variables from a single list. It is safe to run again (matched by name). Values are per mode, and an alias to another variable is written as `{ "alias": "core/blue/500" }`.
 
-> Buat collection `core` (blue/500 = #3B82F6, radius/md = 12) dan collection `theme` dengan mode Light dan Dark: `primary` Light mengacu ke core/blue/500, Dark = #60A5FA.
+> Create a `core` collection (blue/500 = #3B82F6, radius/md = 12) and a `theme` collection with Light and Dark modes: `primary` Light refers to core/blue/500, Dark = #60A5FA.
 
-### Arah gradient
+### Gradient direction
 
-Pilih salah satu: `direction` (seperti CSS: `"to bottom"`, `"to bottom right"`), `cssAngle` (konvensi CSS: 0 = ke atas, 90 = ke kanan, 180 = ke bawah), atau `angle` (0 = kiri ke kanan, 90 = atas ke bawah, searah jarum jam).
+Pick one: `direction` (like CSS: `"to bottom"`, `"to bottom right"`), `cssAngle` (CSS convention: 0 = up, 90 = right, 180 = down), or `angle` (0 = left to right, 90 = top to bottom, clockwise).
 
 ```
 { "type": "GRADIENT_LINEAR", "direction": "to bottom", "stops": [
   { "position": 0, "color": "#000000CC" }, { "position": 1, "color": "#00000000" } ] }
 ```
 
-`figma_get_node` mengembalikan gradient dengan konvensi `angle` yang sama.
+`figma_get_node` returns gradients using the same `angle` convention.
 
-### Perilaku yang perlu diketahui
+### Behaviors to know
 
-- Frame baru dengan auto layout otomatis **HUG** pada sumbu yang tidak kamu beri ukuran (bukan lagi 100×100).
-- Teks diukur ulang otomatis setelah lebar, ukuran font, atau isi berubah, jadi tingginya langsung menyesuaikan.
-- `index` pada `figma_create`, `figma_clone`, dan `figma_update` menentukan urutan (0 = anak pertama), tanpa perlu `figma_update` sesudahnya.
-- `layoutPositioning: "ABSOLUTE"` mengeluarkan anak dari alur auto layout sehingga `x`/`y` berlaku (badge, gambar yang menimpa kartu). `constraints` boleh ditambahkan.
-- `figma_get_node` juga mengembalikan `effects` (shadow dan blur) dengan format yang sama seperti `figma_create`. Id halaman atau id yang tidak dikenal memberi pesan yang jelas; `figma_list_children` mendaftar isi sebuah halaman atau node (dengan `pageName` untuk halaman lain).
-- Gaya font dicocokkan lintas penulisan: `Semi Bold` (Inter) dan `SemiBold` (Poppins) sama-sama diterima.
-- `figma_export` dengan `format: "SVG"` mengembalikan markup SVG (teks diubah jadi outline). `savePath: "D:/proyek/img/logo.svg"` menyimpannya ke file.
+- New auto-layout frames automatically **HUG** on any axis you did not size (no longer 100×100).
+- Text is re-measured automatically after the width, font size, or content changes, so its height adjusts right away.
+- `index` on `figma_create`, `figma_clone`, and `figma_update` sets the order (0 = first child), with no need for a `figma_update` afterwards.
+- `layoutPositioning: "ABSOLUTE"` takes a child out of the auto-layout flow so `x`/`y` apply (badges, images overlapping a card). `constraints` may be added.
+- `figma_get_node` also returns `effects` (shadows and blurs) in the same format as `figma_create`. A page id or an unknown id gives a clear message; `figma_list_children` lists the contents of a page or node (with `pageName` for other pages).
+- Font styles are matched across spellings: `Semi Bold` (Inter) and `SemiBold` (Poppins) are both accepted.
+- `figma_export` with `format: "SVG"` returns SVG markup (text converted to outlines). `savePath: "D:/project/img/logo.svg"` saves it to a file.
 
-### Batasan
+### Limitations
 
-- **Responsif**: Figma tidak punya breakpoint, jadi satu impor menghasilkan satu lebar. Untuk versi lain, impor lagi dengan `width: 768` atau `390` ke frame terpisah.
-- Konverter HTML diuji di Chromium, dan plugin diuji dengan Figma tiruan. Arah gradient dan pengukuran ulang teks belum diuji di Figma asli, jadi coba dulu di file percobaan.
+- **Responsive**: Figma has no breakpoints, so one import produces one width. For other versions, import again with `width: 768` or `390` into a separate frame.
+- The HTML converter is tested in Chromium, and the plugin is tested with a fake Figma. Gradient direction and text re-measuring have not been tested in real Figma, so try them in a scratch file first.
 
-## Referensi tool
+## Tool reference
 
-| Tool | Fungsi |
+| Tool | Purpose |
 |---|---|
-| `figma_status` | Cek koneksi, nama file, halaman, jumlah seleksi |
-| `figma_get_selection` | Baca node yang sedang dipilih |
-| `figma_list_variables` | Daftar collection dan variable lokal di file (hanya baca) |
-| `figma_get_node` | Baca node (atau halaman) berdasarkan id |
-| `figma_get_slots` | Baca slot Sumber dan Target (teks berurutan, gambar, struktur) |
-| `figma_set_slot` | Isi atau kosongkan slot (dari id atau seleksi saat ini) |
-| `figma_list_children` | Daftar anak sebuah halaman atau node (id, nama, tipe, posisi, ukuran) |
-| `figma_create` | Buat node, boleh bertingkat (auto layout, teks, gradient, shadow, gambar, vector, SVG) |
-| `figma_import_html` | Ubah HTML + CSS jadi frame auto layout |
-| `figma_boolean` | Union, subtract, intersect, exclude, dan flatten bentuk |
-| `figma_create_variables` | Buat atau perbarui collection, mode, dan variable dari daftar token |
-| `figma_update` | Ubah properti node, atau pindahkan ke parent lain |
-| `figma_delete` | Hapus node (bisa di-undo di Figma) |
-| `figma_clone` | Duplikat node |
-| `figma_combine_variants` | Gabungkan node COMPONENT jadi satu component set (variant). Nama komponen harus `property=value, property=value` |
-| `figma_arrange_variants` | Susun variant dalam component set menjadi grid rapi (`rows` dan `columns` berupa nama property variant) |
-| `figma_rebind_variables` | Di satu node dan anak-anaknya, pindahkan variable dari satu collection ke variable bernama sama di collection lain (mis. `light` → `dark`) |
-| `figma_create_variable` | Buat atau perbarui satu variable di collection yang sudah ada (warna hex, alias, atau composed color: warna + opacity) |
-| `figma_create_instance` | Buat instance dari COMPONENT, atau dari variant tertentu di COMPONENT_SET (`variant:{size:"md"}`) |
-| `figma_create_effect_style` | Buat atau perbarui effect style (mis. `elevation/2`); pasang ke node dengan `effectStyle` |
-| `figma_create_text_style` | Buat atau perbarui text style (mis. `text/sm`), field-nya bisa diikat ke variable; pasang dengan prop `textStyle` |
-| `figma_list_styles` | Daftar effect, text dan paint style lokal (hanya baca) |
-| `figma_apply_text_styles` | Pasang text style lokal ke semua teks di bawah satu node (cocok lewat family, style dan ukuran font; isi instance dilewati; `dryRun` hanya melapor) |
-| `figma_select` | Pilih node dan zoom ke sana |
-| `figma_export` | Ekspor node jadi gambar (PNG/JPG) supaya Claude bisa melihat hasilnya, atau SVG (bisa disimpan ke file) |
+| `figma_status` | Check the connection, file name, page, and selection count |
+| `figma_get_selection` | Read the currently selected nodes |
+| `figma_list_variables` | List the file's local collections and variables (read-only) |
+| `figma_get_node` | Read a node (or page) by id |
+| `figma_get_slots` | Read the Source and Target slots (ordered text, images, structure) |
+| `figma_set_slot` | Fill or clear a slot (from ids or the current selection) |
+| `figma_list_children` | List the children of a page or node (id, name, type, position, size) |
+| `figma_create` | Create nodes, optionally nested (auto layout, text, gradients, shadows, images, vectors, SVG) |
+| `figma_import_html` | Turn HTML + CSS into auto-layout frames |
+| `figma_boolean` | Union, subtract, intersect, exclude, and flatten shapes |
+| `figma_create_variables` | Create or update collections, modes, and variables from a list of tokens |
+| `figma_update` | Change node properties, or move a node to another parent |
+| `figma_delete` | Delete nodes (can be undone in Figma) |
+| `figma_clone` | Duplicate a node |
+| `figma_combine_variants` | Combine COMPONENT nodes into one component set (variants). Component names must be `property=value, property=value` |
+| `figma_arrange_variants` | Arrange the variants in a component set into a tidy grid (`rows` and `columns` are variant property names) |
+| `figma_rebind_variables` | On one node and its children, switch variables from one collection to the same-named variables in another collection (e.g. `light` → `dark`) |
+| `figma_create_variable` | Create or update a single variable in an existing collection (hex color, alias, or composed color: color + opacity) |
+| `figma_create_instance` | Create an instance of a COMPONENT, or of a specific variant in a COMPONENT_SET (`variant:{size:"md"}`) |
+| `figma_create_effect_style` | Create or update an effect style (e.g. `elevation/2`); apply it to a node with `effectStyle` |
+| `figma_create_text_style` | Create or update a text style (e.g. `text/sm`), with fields that can be bound to variables; apply it with the `textStyle` prop |
+| `figma_list_styles` | List local effect, text, and paint styles (read-only) |
+| `figma_apply_text_styles` | Apply local text styles to all text under a node (matched by font family, style, and size; instance contents are skipped; `dryRun` only reports) |
+| `figma_select` | Select nodes and zoom to them |
+| `figma_export` | Export a node as an image (PNG/JPG) so Claude can see the result, or as SVG (can be saved to a file) |
 
-Properti node yang didukung (ringkas): `type` (FRAME, COMPONENT, RECTANGLE, ELLIPSE, TEXT, LINE, POLYGON, STAR, VECTOR, SVG), `name`, `x`, `y`, `width`, `height`, `rotation`, `opacity`, `fills`, `strokes`, `cornerRadius`, `effects`, auto layout (`layoutMode`, `itemSpacing`, `padding`, `primaryAxisAlignItems`, `layoutSizingHorizontal` dst.), teks (`characters`, `fontSize`, `fontFamily`, `fontStyle`, `lineHeight`, `letterSpacing`, `textAlignHorizontal`), dan `children`. Daftar lengkap ada di deskripsi tool `figma_create`.
+Supported node properties (summary): `type` (FRAME, COMPONENT, RECTANGLE, ELLIPSE, TEXT, LINE, POLYGON, STAR, VECTOR, SVG), `name`, `x`, `y`, `width`, `height`, `rotation`, `opacity`, `fills`, `strokes`, `cornerRadius`, `effects`, auto layout (`layoutMode`, `itemSpacing`, `padding`, `primaryAxisAlignItems`, `layoutSizingHorizontal`, etc.), text (`characters`, `fontSize`, `fontFamily`, `fontStyle`, `lineHeight`, `letterSpacing`, `textAlignHorizontal`), and `children`. The full list is in the description of the `figma_create` tool.
 
-## Mematikan dan memperbarui
+## Stopping and updating
 
-**Mematikan**
+**Stopping**
 
-1. Tutup jendela **Claude Bridge** di Figma (tombol X). Claude tidak bisa lagi mengubah file Figma-mu.
-2. Server MCP berjalan bersama Claude Desktop dan berhenti saat aplikasinya ditutup. Untuk menonaktifkan tanpa menutup aplikasi: **Settings → Desktop app → Extensions → Manage → Local MCP servers**, lalu matikan atau hapus `figma-bridge`.
+1. Close the **Claude Bridge** window in Figma (the X button). Claude can no longer change your Figma file.
+2. The MCP server runs together with Claude Desktop and stops when the app is closed. To disable it without closing the app: **Settings → Desktop app → Extensions → Manage → Local MCP servers**, then turn off or delete `figma-bridge`.
 
-**Memperbarui setelah `git pull`**
+**Updating after `git pull`**
 
-0. Kalau folder lokalmu punya perubahan sendiri yang tidak dipakai lagi (misalnya node `SVG` buatan sendiri, sekarang sudah ada di repo), simpan dulu dengan `git stash` atau buang dengan `git checkout -- .` sebelum menarik.
-1. Tutup Claude Desktop sepenuhnya, lalu buka lagi (supaya server baru dipakai).
-2. Di Figma, tutup jendela Claude Bridge lalu jalankan lagi dari Plugins → Development. Tidak perlu impor ulang, kecuali `plugin/manifest.json` berubah. Jendela itu wajib dibuka ulang setelah pembaruan yang mengubah `plugin/ui.html` (misalnya impor HTML).
+0. If your local folder has changes of its own that you no longer need (for example a self-made `SVG` node, which is now in the repo), save them with `git stash` or discard them with `git checkout -- .` before pulling.
+1. Quit Claude Desktop completely, then open it again (so the new server is used).
+2. In Figma, close the Claude Bridge window and run it again from Plugins → Development. You do not need to re-import unless `plugin/manifest.json` changed. The window must be reopened after any update that changes `plugin/ui.html` (for example HTML import).
 
-## Pemecahan masalah
+## Troubleshooting
 
-| Gejala | Penyebab dan solusi |
+| Symptom | Cause and solution |
 |---|---|
-| `claude : The term 'claude' is not recognized` | Claude Code belum terpasang. Pasang dengan `npm install -g @anthropic-ai/claude-code`, atau pakai Claude Desktop. |
-| `figma-bridge` berstatus **Failed** / "Connection closed" | Klik **View logs**. Pastikan path di konfigurasi benar (pakai `/`), `npm install` sudah dijalankan, dan Node.js terpasang. Lalu restart Claude Desktop sepenuhnya. |
-| Figma: `Manifest error: Invalid value for devAllowedDomains` | Figma menolak alamat IP. `devAllowedDomains` harus `["ws://localhost:3055"]` (sudah begitu di repo ini). |
-| Claude menjawab "Figma plugin is not connected" | Jendela plugin belum dibuka atau tertutup. Buka lagi lewat Plugins → Development → Claude Bridge sampai titik hijau. Perbarui ke versi terbaru (ada dukungan relay untuk beberapa instance server). |
-| Titik di jendela plugin tetap merah | Server belum jalan (cek `figma-bridge` di Settings → Desktop app → Extensions → Manage → Local MCP servers), atau port berbeda. Samakan kolom **Port** di jendela plugin dengan `FIGMA_BRIDGE_PORT` (default 3055). |
-| Port 3055 dipakai | Set `FIGMA_BRIDGE_PORT` di environment server, isi port yang sama di jendela plugin, dan ubah `devAllowedDomains` di `plugin/manifest.json` menjadi `ws://localhost:PORT`. |
-| `Font "..." is not available` | Font itu tidak ada di Figma. Pakai font yang terpasang (mis. `Inter` dengan `Regular`/`Medium`/`Semi Bold`/`Bold`). `Semi Bold` dan `SemiBold` sudah dicocokkan otomatis. Untuk impor HTML font cadangan dipakai otomatis. |
-| `Unknown command: html_to_spec` | Jendela plugin masih versi lama. Tutup dan buka lagi dari Plugins → Development. |
-| `Timed out after 30s` | Operasi besar bisa lama. Naikkan `FIGMA_BRIDGE_TIMEOUT_MS` (default 30000). |
-| `Unsupported image format` | Fill gambar hanya menerima PNG, JPEG, GIF. Konversi WebP/SVG dulu. |
+| `claude : The term 'claude' is not recognized` | Claude Code is not installed. Install it with `npm install -g @anthropic-ai/claude-code`, or use Claude Desktop. |
+| `figma-bridge` shows **Failed** / "Connection closed" | Click **View logs**. Make sure the path in the config is correct (use `/`), `npm install` has been run, and Node.js is installed. Then restart Claude Desktop completely. |
+| Figma: `Manifest error: Invalid value for devAllowedDomains` | Figma rejects IP addresses. `devAllowedDomains` must be `["ws://localhost:3055"]` (already so in this repo). |
+| Claude replies "Figma plugin is not connected" | The plugin window is not open or was closed. Open it again via Plugins → Development → Claude Bridge until the dot is green. Update to the latest version (it supports relaying between several server instances). |
+| The dot in the plugin window stays red | The server is not running (check `figma-bridge` in Settings → Desktop app → Extensions → Manage → Local MCP servers), or the port differs. Make the **Port** field in the plugin window match `FIGMA_BRIDGE_PORT` (default 3055). |
+| Port 3055 is in use | Set `FIGMA_BRIDGE_PORT` in the server environment, enter the same port in the plugin window, and change `devAllowedDomains` in `plugin/manifest.json` to `ws://localhost:PORT`. |
+| `Font "..." is not available` | That font does not exist in Figma. Use an installed font (e.g. `Inter` with `Regular`/`Medium`/`Semi Bold`/`Bold`). `Semi Bold` and `SemiBold` are matched automatically. For HTML import a fallback font is used automatically. |
+| `Unknown command: html_to_spec` | The plugin window is still the old version. Close it and open it again from Plugins → Development. |
+| `Timed out after 30s` | Large operations can take a while. Raise `FIGMA_BRIDGE_TIMEOUT_MS` (default 30000). |
+| `Unsupported image format` | Image fills only accept PNG, JPEG, GIF. Convert WebP/SVG first. |
 
-Catatan: Claude Desktop bisa menjalankan server ini lebih dari sekali (misalnya untuk chat dan sesi Code). Server sudah menangani ini: satu instance memegang koneksi ke plugin, instance lain meneruskan perintahnya lewat instance itu, dan mengambil alih bila yang pertama berhenti.
+Note: Claude Desktop may run this server more than once (for example for a chat and a Code session). The server handles this: one instance holds the connection to the plugin, the other instances forward their commands through it, and take over if the first one stops.
 
-## Pengembangan dan tes
+## Development and tests
 
 ```bash
-npm test    # server MCP, relay, gambar, impor HTML, logika plugin (Figma tiruan), konverter HTML
+npm test    # MCP server, relay, images, HTML import, plugin logic (fake Figma), HTML converter
 ```
 
-Tes konverter HTML berjalan di Chromium lewat Playwright dan dilewati otomatis bila Playwright tidak terpasang (`npm i -D playwright && npx playwright install chromium` untuk menjalankannya). Semua tes memakai Figma tiruan, bukan Figma asli. Uji perubahan di file Figma kosong dulu.
+The HTML converter tests run in Chromium via Playwright and are skipped automatically if Playwright is not installed (`npm i -D playwright && npx playwright install chromium` to run them). All tests use a fake Figma, not real Figma. Try changes in an empty Figma file first.
 
-Struktur:
+Structure:
 
 ```
-server/index.js      server MCP + WebSocket bridge (+ relay antar instance, pemuat gambar, impor HTML)
-plugin/manifest.json manifest plugin Figma
-plugin/code.js       kode utama plugin (Figma Plugin API)
-plugin/ui.html       jendela plugin (WebSocket, pengaturan, slot, konverter HTML ke desain)
-test/                tes otomatis (test/fixtures: halaman contoh dan hasil konversinya)
+server/index.js      MCP server + WebSocket bridge (+ relay between instances, image loader, HTML import)
+plugin/manifest.json Figma plugin manifest
+plugin/code.js       main plugin code (Figma Plugin API)
+plugin/ui.html       plugin window (WebSocket, settings, slots, HTML-to-design converter)
+test/                automated tests (test/fixtures: a sample page and its conversion result)
 ```
 
-## Catatan keamanan
+## Security notes
 
-- Server hanya mendengarkan di `127.0.0.1` (tidak terbuka ke jaringan), tetapi program lain di komputermu yang tahu port-nya bisa terhubung. Pakai di komputer pribadi.
-- Impor HTML merender halaman di jendela tersembunyi tanpa menjalankan skrip dan tanpa memuat sumber luar. Stylesheet dan gambar lokal hanya dibaca dari folder HTML (atau `baseDir`). Tetap jangan impor HTML dari sumber yang tidak kamu percayai.
-- Karena Claude dapat membaca file gambar dari `path` yang ia tentukan, jangan jalankan brief dari sumber yang tidak kamu percayai. Server hanya meneruskan file yang terbukti PNG/JPEG/GIF ke Figma, dan hanya sampai 12 MB.
-- Plugin ini dibuat untuk pemakaian pribadi (mode development), bukan untuk dipublikasikan ke Figma Community.
+- The server only listens on `127.0.0.1` (not exposed to the network), but other programs on your computer that know the port can connect. Use it on a personal computer.
+- HTML import renders the page in a hidden window without running scripts and without loading outside resources. Local stylesheets and images are only read from the HTML folder (or `baseDir`). Still, do not import HTML from sources you do not trust.
+- Because Claude can read image files from a `path` it chooses, do not run briefs from sources you do not trust. The server only forwards files proven to be PNG/JPEG/GIF to Figma, and only up to 12 MB.
+- This plugin is made for personal use (development mode), not for publishing to the Figma Community.

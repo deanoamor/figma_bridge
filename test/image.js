@@ -69,6 +69,19 @@ assert.equal(kids[1].fills[0].base64, JPG.toString("base64"));
 assert.equal(kids[1].fills[1], "#00000033", "other fills untouched");
 console.log("ok: local PNG/JPEG paths, nested children");
 
+// base64 and data: URI (no file or network needed)
+r = await call("figma_create", { spec: { type: "FRAME", children: [
+  { type: "RECTANGLE", fills: [{ type: "IMAGE", base64: PNG.toString("base64"), scaleMode: "FIT" }] },
+  { type: "RECTANGLE", fills: [{ type: "IMAGE", base64: "data:image/jpeg;base64," + JPG.toString("base64") }] },
+  { type: "RECTANGLE", fills: [{ type: "IMAGE", url: "data:image/png;base64," + PNG.toString("base64") }] },
+] } });
+assert.equal(r.isError, false, r.text);
+const k2 = last().spec.children;
+assert.equal(k2[0].fills[0].base64, PNG.toString("base64")); assert.equal(k2[0].fills[0].scaleMode, "FIT");
+assert.equal(k2[1].fills[0].base64, JPG.toString("base64"));
+assert.equal(k2[2].fills[0].base64, PNG.toString("base64"));
+console.log("ok: base64 and data: URI");
+
 // url + cache (same url used twice -> downloaded once)
 hits = 0;
 r = await call("figma_update", { id: "1:1", props: { fills: [{ type: "IMAGE", url: `${base}/a.png` }, { type: "IMAGE", url: `${base}/a.png`, opacity: 0.5 }] } });
@@ -99,6 +112,8 @@ await bad({ type: "IMAGE", path: path.join(dir, "big.png") }, /too large/, "too 
 await bad({ type: "IMAGE", url: `${base}/page.html` }, /Unsupported image format/, "html page");
 await bad({ type: "IMAGE", url: `${base}/gone.png` }, /HTTP 404/, "404");
 await bad({ type: "IMAGE", url: "http://127.0.0.1:1/x.png" }, /Could not download/, "unreachable");
+await bad({ type: "IMAGE", base64: "!!!not base64!!!" }, /base64/i, "invalid base64");
+await bad({ type: "IMAGE", base64: Buffer.from("just some text, not an image").toString("base64") }, /Unsupported image format/, "non-image base64");
 console.log("ok: errors are clear and nothing is sent to Figma");
 
 ws.close();

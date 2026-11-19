@@ -44,6 +44,26 @@ function rgbToHex(c, a) {
   return out.toUpperCase();
 }
 
+// Linear gradient direction. `angle` is in degrees, clockwise, 0 = left to right:
+// 0 = to right, 90 = to bottom, 180 = to left, 270 = to top. For CSS-style values use
+// `cssAngle` (0deg = to top, 90deg = to right, 180deg = to bottom) or `direction` ("to bottom right").
+var GRADIENT_DIRECTIONS = {
+  "right": 0, "bottom right": 45, "bottom": 90, "bottom left": 135,
+  "left": 180, "top left": 225, "top": 270, "top right": 315,
+};
+function directionToAngle(dir) {
+  var words = String(dir).toLowerCase().replace(/^to\s+/, "").trim().split(/\s+/);
+  // "left top" means the same as "top left": put the vertical word first
+  words.sort(function (a, b) {
+    return (a === "top" || a === "bottom" ? 0 : 1) - (b === "top" || b === "bottom" ? 0 : 1);
+  });
+  var key = words.join(" ");
+  if (GRADIENT_DIRECTIONS[key] === undefined) {
+    throw new Error('Unknown gradient direction "' + dir + '". Use e.g. "to right", "to bottom", "to bottom right".');
+  }
+  return GRADIENT_DIRECTIONS[key];
+}
+
 function toPaint(p) {
   if (typeof p === "string") {
     var c = hexToRgba(p);
@@ -55,7 +75,10 @@ function toPaint(p) {
       var c = hexToRgba(s.color);
       return { position: s.position, color: { r: c.r, g: c.g, b: c.b, a: c.a } };
     });
-    var rad = ((p.angle || 0) * Math.PI) / 180;
+    var angle = p.angle || 0;
+    if (typeof p.cssAngle === "number") angle = p.cssAngle - 90;
+    else if (typeof p.direction === "string") angle = directionToAngle(p.direction);
+    var rad = (angle * Math.PI) / 180;
     var cos = Math.cos(rad), sin = Math.sin(rad);
     var t = [
       [cos, sin, 0.5 - 0.5 * cos - 0.5 * sin],
@@ -148,29 +171,106 @@ function toEffect(e) {
 }
 
 var loadedFonts = {};
+var fontFallback = null;      // family to use when a font is missing (set per call by `fallbackFont`)
+var fontSubstitutions = [];
+
+// Style names differ per font family: Poppins has "SemiBold", Inter has "Semi Bold". Try the usual spellings.
+var WEIGHT_ALIASES = {
+  thin: ["Thin", "Hairline"], extralight: ["Extra Light", "ExtraLight", "Extralight", "Ultra Light", "UltraLight"],
+  light: ["Light"], regular: ["Regular", "Book", "Normal"], medium: ["Medium"],
+  semibold: ["Semi Bold", "SemiBold", "Semibold", "Demi Bold", "DemiBold"], bold: ["Bold"],
+  extrabold: ["Extra Bold", "ExtraBold", "Extrabold", "Ultra Bold", "UltraBold"], black: ["Black", "Heavy"],
+};
+function styleAlternatives(style) {
+  var out = [style];
+  var compact = String(style).toLowerCase().replace(/[\s_-]+/g, "");
+  var italic = /italic$/.test(compact);
+  var weight = compact.replace(/italic$/, "") || "regular";
+  var names = WEIGHT_ALIASES[weight] || [];
+  names.forEach(function (n) {
+    if (!italic) out.push(n);
+    else { out.push(n + " Italic"); if (weight === "regular") out.push("Italic"); }
+  });
+  if (italic && weight === "regular") out.push("Italic");
+  return out.filter(function (v, i) { return out.indexOf(v) === i; });
+}
+
+// Loads the font and returns the { family, style } that was actually available.
 async function ensureFont(family, style) {
   var key = family + "|" + style;
-  if (loadedFonts[key]) return;
-  try {
-    await figma.loadFontAsync({ family: family, style: style });
-  } catch (e) {
+  if (loadedFonts[key]) return loadedFonts[key];
+  var tryFamily = async function (fam) {
+    var styles = styleAlternatives(style);
+    for (var i = 0; i < styles.length; i++) {
+      try {
+        await figma.loadFontAsync({ family: fam, style: styles[i] });
+        return { family: fam, style: styles[i] };
+      } catch (e) { /* try the next spelling */ }
+    }
+    return null;
+  };
+  var found = await tryFamily(family);
+  if (!found && fontFallback && family !== fontFallback) {
+    found = await tryFamily(fontFallback); // same weight in the fallback family
+    if (!found) {
+      try { await figma.loadFontAsync({ family: fontFallback, style: "Regular" }); found = { family: fontFallback, style: "Regular" }; } catch (e) {}
+    }
+    if (found) {
+      var note = family + " " + style + " -> " + found.family + " " + found.style;
+      if (fontSubstitutions.indexOf(note) < 0) fontSubstitutions.push(note);
+    }
+  }
+  if (!found) {
     throw new Error('Font "' + family + " " + style + '" is not available. Try fontFamily "Inter" with fontStyle "Regular"/"Bold".');
   }
-  loadedFonts[key] = true;
+  loadedFonts[key] = found;
+  return found;
 }
 
 async function getParent(parentId) {
   if (!parentId) return figma.currentPage;
   var p = await figma.getNodeByIdAsync(parentId);
-  if (!p) throw new Error("Parent not found: " + parentId);
+  if (!p) throw new Error("Parent not found: " + parentId + NODE_HINT);
   if (!("appendChild" in p)) throw new Error("Node " + parentId + " (" + p.type + ") cannot contain children");
   return p;
 }
 
+var NODE_HINT = ' Node ids look like "12:34" (copy them from a tool result, figma_list_children or figma_status). ' +
+  "A deleted node or an id from another file no longer exists.";
+
 async function getNode(id) {
-  var n = await figma.getNodeByIdAsync(id);
-  if (!n) throw new Error("Node not found: " + id);
+  var n = typeof id === "string" && id ? await figma.getNodeByIdAsync(id) : null;
+  if (!n) throw new Error("Node not found: " + id + "." + NODE_HINT);
+  // with dynamic-page access a page's children are only readable after it is loaded
+  if (n.type === "PAGE" && typeof n.loadAsync === "function") await n.loadAsync();
   return n;
+}
+
+// Move `node` (already a child of `parent`) so it ends up at position `index` (0 = first child,
+// which is the first item in an auto-layout row/column). Out-of-range values are clamped.
+function placeAt(parent, node, index) {
+  if (typeof index !== "number" || !isFinite(index)) return;
+  if (!("insertChild" in parent)) throw new Error("index needs a parent that can contain children");
+  var target = Math.max(0, Math.min(Math.floor(index), parent.children.length - 1));
+  parent.insertChild(target, node);
+  // insertChild's index is relative to the list without the moved node; verify and correct once
+  var actual = parent.children.indexOf(node);
+  if (actual !== target && actual >= 0) {
+    parent.insertChild(Math.max(0, Math.min(actual < target ? target + 1 : target - 1, parent.children.length - 1)), node);
+  }
+}
+
+// Figma returns the `figma.mixed` symbol for properties that differ inside one node, and a
+// symbol cannot be sent to the UI ("Cannot unwrap symbol"). Turn every symbol into "mixed".
+function clean(v) {
+  if (typeof v === "symbol") return "mixed";
+  if (Array.isArray(v)) return v.map(clean);
+  if (v && typeof v === "object") {
+    var out = {};
+    Object.keys(v).forEach(function (k) { if (typeof v[k] !== "function") out[k] = clean(v[k]); });
+    return out;
+  }
+  return v;
 }
 
 // ---- variables: bind design tokens to nodes by name ("collection/variable", e.g. "light/primary")
@@ -252,10 +352,162 @@ async function rebindNode(node, from, to, stats, c) {
   }
 }
 
+// Flipping the auto-resize mode forces Figma to recompute the text box from its current width,
+// font and content; the original mode is restored afterwards.
+function remeasureText(node) {
+  var mode = node.textAutoResize;
+  if (mode === "NONE" || mode === figma.mixed) return;
+  node.textAutoResize = "NONE";
+  node.textAutoResize = mode;
+}
+
+// ------------------------------------------------------------- vector paths
+// Figma's vectorPaths understand M L C Q Z (absolute). Accept the full SVG path syntax except arcs:
+// relative commands, H/V, S and T are converted; "A" is rejected with a pointer to the SVG node.
+function normalizePathData(d) {
+  var src = String(d);
+  var re = /([a-zA-Z])|([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)/g;
+  var toks = [], m;
+  while ((m = re.exec(src))) toks.push(m[1] || parseFloat(m[2]));
+  if (src.replace(re, "").replace(/[\s,]/g, "")) throw new Error('Path data has unexpected characters: "' + src.slice(0, 60) + '"');
+  var arity = { M: 2, L: 2, H: 1, V: 1, C: 6, S: 4, Q: 4, T: 2, Z: 0 };
+  var out = [], i = 0, cx = 0, cy = 0, sx = 0, sy = 0, cmd = "", lastUp = "", lcx = 0, lcy = 0;
+  var num = function () {
+    var v = toks[i++];
+    if (typeof v !== "number") throw new Error('Path data is malformed near "' + src.slice(0, 60) + '"');
+    return v;
+  };
+  var f = function (n) { return String(Math.round(n * 1000) / 1000); };
+  while (i < toks.length) {
+    if (typeof toks[i] === "string") cmd = toks[i++];
+    else if (!cmd) throw new Error('Path data is malformed near "' + src.slice(0, 60) + '"');
+    var up = cmd.toUpperCase(), rel = cmd !== up;
+    if (up === "A") {
+      throw new Error('Path command "A" (arc) is not supported in vectorPaths. Use a node of type "SVG" for shapes with arcs, or approximate the arc with C curves.');
+    }
+    if (!(up in arity)) throw new Error('Unknown path command "' + cmd + '"');
+    if (out.length === 0 && up !== "M") throw new Error('Path data must start with M (moveto)');
+    var ox = rel ? cx : 0, oy = rel ? cy : 0;
+    if (up === "Z") { out.push("Z"); cx = sx; cy = sy; lastUp = "Z"; cmd = ""; continue; }
+    if (up === "M") {
+      var mx = num() + ox, my = num() + oy;
+      out.push("M " + f(mx) + " " + f(my)); cx = sx = mx; cy = sy = my;
+      cmd = rel ? "l" : "L"; // extra pairs after M are lineto
+    } else if (up === "L") {
+      var lx = num() + ox, ly = num() + oy; out.push("L " + f(lx) + " " + f(ly)); cx = lx; cy = ly;
+    } else if (up === "H") {
+      var hx = num() + ox; out.push("L " + f(hx) + " " + f(cy)); cx = hx;
+    } else if (up === "V") {
+      var vy = num() + oy; out.push("L " + f(cx) + " " + f(vy)); cy = vy;
+    } else if (up === "C") {
+      var c1x = num() + ox, c1y = num() + oy, c2x = num() + ox, c2y = num() + oy, ex = num() + ox, ey = num() + oy;
+      out.push("C " + f(c1x) + " " + f(c1y) + " " + f(c2x) + " " + f(c2y) + " " + f(ex) + " " + f(ey));
+      lcx = c2x; lcy = c2y; cx = ex; cy = ey;
+    } else if (up === "S") {
+      var s2x = num() + ox, s2y = num() + oy, sex = num() + ox, sey = num() + oy;
+      var s1x = lastUp === "C" || lastUp === "S" ? 2 * cx - lcx : cx, s1y = lastUp === "C" || lastUp === "S" ? 2 * cy - lcy : cy;
+      out.push("C " + f(s1x) + " " + f(s1y) + " " + f(s2x) + " " + f(s2y) + " " + f(sex) + " " + f(sey));
+      lcx = s2x; lcy = s2y; cx = sex; cy = sey;
+    } else if (up === "Q") {
+      var q1x = num() + ox, q1y = num() + oy, qex = num() + ox, qey = num() + oy;
+      out.push("Q " + f(q1x) + " " + f(q1y) + " " + f(qex) + " " + f(qey));
+      lcx = q1x; lcy = q1y; cx = qex; cy = qey;
+    } else if (up === "T") {
+      var tex = num() + ox, tey = num() + oy;
+      var t1x = lastUp === "Q" || lastUp === "T" ? 2 * cx - lcx : cx, t1y = lastUp === "Q" || lastUp === "T" ? 2 * cy - lcy : cy;
+      out.push("Q " + f(t1x) + " " + f(t1y) + " " + f(tex) + " " + f(tey));
+      lcx = t1x; lcy = t1y; cx = tex; cy = tey;
+    }
+    lastUp = up;
+  }
+  if (out.length === 0) throw new Error("Path data is empty");
+  return out.join(" ");
+}
+
+// spec.vectorPaths: [{ data, windingRule? }] or ["M 0 0 L ..."]; spec.path: a single path string.
+function toVectorPaths(spec) {
+  var list = spec.vectorPaths !== undefined ? spec.vectorPaths : [spec.path];
+  if (!Array.isArray(list) || list.length === 0) throw new Error("vectorPaths must be a non-empty array of path strings or { data, windingRule }");
+  return list.map(function (e) {
+    var data = typeof e === "string" ? e : e && e.data;
+    if (typeof data !== "string") throw new Error("Each vector path needs a data string (SVG path syntax)");
+    var rule = (e && e.windingRule) || "NONZERO";
+    if (rule !== "NONZERO" && rule !== "EVENODD") throw new Error('windingRule must be "NONZERO" or "EVENODD"');
+    return { windingRule: rule, data: normalizePathData(data) };
+  });
+}
+
+// ------------------------------------------------------------- mixed text styles
+// spec.runs: [{ text, fontSize?, fontFamily?, fontStyle?, color?, textDecoration?, letterSpacing?, lineHeight? }]
+// builds the text from the runs; spec.ranges: [{ start, end, ...same style fields }] styles part of `characters`.
+var RUN_STYLE_KEYS = ["fontSize", "fontFamily", "fontStyle", "color", "textDecoration", "letterSpacing", "lineHeight"];
+
+function prepareRuns(spec) {
+  var ranges = [], chars = "";
+  if (spec.runs !== undefined) {
+    if (!Array.isArray(spec.runs) || spec.runs.length === 0) throw new Error("runs must be a non-empty array of { text, ...style }");
+    spec.runs.forEach(function (r, i) {
+      if (!r || typeof r.text !== "string") throw new Error("runs[" + i + "] needs a text string");
+      var rr = { start: chars.length, end: chars.length + r.text.length };
+      RUN_STYLE_KEYS.forEach(function (k) { if (r[k] !== undefined) rr[k] = r[k]; });
+      chars += r.text;
+      if (rr.end > rr.start) ranges.push(rr);
+    });
+  } else {
+    if (!Array.isArray(spec.ranges)) throw new Error("ranges must be an array of { start, end, ...style }");
+    ranges = spec.ranges;
+  }
+  var out = Object.assign({}, spec, { _ranges: ranges });
+  if (spec.runs !== undefined) out.characters = chars;
+  return out;
+}
+
+async function applyTextRanges(node, ranges) {
+  var len = node.characters.length;
+  for (var i = 0; i < ranges.length; i++) {
+    var r = ranges[i], a = r.start, b = r.end;
+    if (typeof a !== "number" || typeof b !== "number" || a < 0 || b > len || a >= b) {
+      throw new Error("Text range " + i + " is invalid: start " + a + ", end " + b + " (the text has " + len + " characters; end is exclusive)");
+    }
+    if (r.fontFamily !== undefined || r.fontStyle !== undefined) {
+      var cur = node.getRangeFontName(a, b);
+      var fam = r.fontFamily || (cur !== figma.mixed ? cur.family : node.fontName !== figma.mixed ? node.fontName.family : "Inter");
+      var sty = r.fontStyle || (cur !== figma.mixed ? cur.style : "Regular");
+      var rf = await ensureFont(fam, sty);
+      node.setRangeFontName(a, b, { family: rf.family, style: rf.style });
+    }
+    if (r.fontSize !== undefined) node.setRangeFontSize(a, b, r.fontSize);
+    if (r.color !== undefined) node.setRangeFills(a, b, await toPaintsAsync(r.color));
+    if (r.textDecoration !== undefined) node.setRangeTextDecoration(a, b, r.textDecoration);
+    if (r.letterSpacing !== undefined) node.setRangeLetterSpacing(a, b, { unit: "PIXELS", value: r.letterSpacing });
+    if (r.lineHeight !== undefined) node.setRangeLineHeight(a, b, { unit: "PIXELS", value: r.lineHeight });
+  }
+}
+
+function serializeRuns(node) {
+  if (typeof node.getStyledTextSegments !== "function" || !node.characters.length) return undefined;
+  var segs;
+  try { segs = node.getStyledTextSegments(["fontSize", "fontName", "fills", "textDecoration", "letterSpacing", "lineHeight"]); }
+  catch (e) { return undefined; }
+  if (!segs || segs.length < 2) return undefined;
+  return segs.map(function (g) {
+    var run = { text: g.characters, fontSize: g.fontSize };
+    if (g.fontName && g.fontName !== figma.mixed) { run.fontFamily = g.fontName.family; run.fontStyle = g.fontName.style; }
+    var fl = simplifyPaints(g.fills);
+    if (Array.isArray(fl) && fl.length === 1 && fl[0].type === "SOLID") run.color = fl[0].color;
+    else if (Array.isArray(fl) && fl.length) run.color = fl;
+    if (g.textDecoration && g.textDecoration !== "NONE") run.textDecoration = g.textDecoration;
+    if (g.letterSpacing && g.letterSpacing.value) run.letterSpacing = g.letterSpacing.unit === "PIXELS" ? round(g.letterSpacing.value) : round(g.letterSpacing.value) + "%";
+    if (g.lineHeight && g.lineHeight.unit === "PIXELS") run.lineHeight = round(g.lineHeight.value);
+    return run;
+  });
+}
+
 // ------------------------------------------------------------- apply props
 async function applyProps(node, spec, isCreate) {
   var type = node.type;
   var has = function (k) { return spec[k] !== undefined; };
+  if (type === "TEXT" && (has("runs") || has("ranges"))) spec = prepareRuns(spec);
 
   if (has("name")) node.name = String(spec.name);
   if (has("visible")) node.visible = !!spec.visible;
@@ -276,8 +528,8 @@ async function applyProps(node, spec, isCreate) {
         var fonts = node.getRangeAllFontNames(0, node.characters.length);
         for (var i = 0; i < fonts.length; i++) await ensureFont(fonts[i].family, fonts[i].style);
       }
-      await ensureFont(family, style);
-      node.fontName = { family: family, style: style };
+      var resolvedFont = await ensureFont(family, style);
+      node.fontName = { family: resolvedFont.family, style: resolvedFont.style };
     }
     if (has("characters")) node.characters = String(spec.characters);
     if (has("fontSize")) node.fontSize = spec.fontSize;
@@ -287,7 +539,26 @@ async function applyProps(node, spec, isCreate) {
     if (has("letterSpacing")) node.letterSpacing = { unit: "PIXELS", value: spec.letterSpacing };
     if (has("textAutoResize")) node.textAutoResize = spec.textAutoResize;
     if (has("textColor")) node.fills = await toPaintsAsync(spec.textColor);
+    if (spec._ranges) await applyTextRanges(node, spec._ranges);
   }
+
+  // --- vector paths (before size, so width/height scale the drawn path)
+  if (type === "VECTOR" && (has("vectorPaths") || has("path"))) {
+    node.vectorPaths = toVectorPaths(spec);
+    if (isCreate && spec.fills === undefined && spec.strokes === undefined) node.fills = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }];
+  }
+
+  // --- absolute positioning inside an auto-layout parent. This must come BEFORE x/y: while the node
+  // is still part of the flow, Figma ignores x/y.
+  var flowParent = node.parent;
+  var flowParentIsAuto = !!(flowParent && "layoutMode" in flowParent && flowParent.layoutMode !== "NONE");
+  if (has("layoutPositioning")) {
+    if (spec.layoutPositioning === "ABSOLUTE" && !flowParentIsAuto) {
+      throw new Error('layoutPositioning "ABSOLUTE" needs a parent with auto layout (layoutMode HORIZONTAL or VERTICAL)');
+    }
+    if (flowParentIsAuto) node.layoutPositioning = spec.layoutPositioning;
+  }
+  if (has("constraints") && "constraints" in node) node.constraints = spec.constraints;
 
   // --- size / position
   if (has("width") || has("height")) {
@@ -333,6 +604,16 @@ async function applyProps(node, spec, isCreate) {
     if (has("paddingRight")) node.paddingRight = spec.paddingRight;
     if (has("paddingBottom")) node.paddingBottom = spec.paddingBottom;
     if (has("paddingLeft")) node.paddingLeft = spec.paddingLeft;
+
+    // A new auto-layout frame used to stay 100x100 unless both axes were set. Hug the content on
+    // every axis the caller did not size (width/height, layoutSizing*, or an *AxisSizingMode).
+    if (isCreate && (spec.layoutMode === "HORIZONTAL" || spec.layoutMode === "VERTICAL") && type !== "INSTANCE") {
+      var rowLayout = spec.layoutMode === "HORIZONTAL";
+      var sizedH = has("width") || has("layoutSizingHorizontal") || has(rowLayout ? "primaryAxisSizingMode" : "counterAxisSizingMode");
+      var sizedV = has("height") || has("layoutSizingVertical") || has(rowLayout ? "counterAxisSizingMode" : "primaryAxisSizingMode");
+      if (!sizedH) node.layoutSizingHorizontal = "HUG";
+      if (!sizedV) node.layoutSizingVertical = "HUG";
+    }
   }
 
   // --- child sizing inside an auto-layout parent (must be after being appended)
@@ -343,7 +624,6 @@ async function applyProps(node, spec, isCreate) {
     if (has("layoutSizingVertical")) node.layoutSizingVertical = spec.layoutSizingVertical;
     if (has("layoutGrow")) node.layoutGrow = spec.layoutGrow;
     if (has("layoutAlign")) node.layoutAlign = spec.layoutAlign;
-    if (has("layoutPositioning")) node.layoutPositioning = spec.layoutPositioning;
   } else if (
     (has("layoutSizingHorizontal") || has("layoutSizingVertical")) &&
     (node.type === "FRAME" || node.type === "COMPONENT") && node.layoutMode !== "NONE"
@@ -351,6 +631,14 @@ async function applyProps(node, spec, isCreate) {
     // a root auto-layout frame can HUG/FIXED itself
     if (has("layoutSizingHorizontal") && spec.layoutSizingHorizontal !== "FILL") node.layoutSizingHorizontal = spec.layoutSizingHorizontal;
     if (has("layoutSizingVertical") && spec.layoutSizingVertical !== "FILL") node.layoutSizingVertical = spec.layoutSizingVertical;
+  }
+
+  // --- text: re-measure after width / font / content / layout changes. Figma does not always recompute
+  // the height right away (a title stayed 3 lines tall although its new width fits in 2).
+  if (type === "TEXT" && (has("width") || has("fontSize") || has("fontFamily") || has("fontStyle") ||
+      has("characters") || has("runs") || has("ranges") || has("lineHeight") || has("letterSpacing") || has("textAutoResize") ||
+      has("layoutSizingHorizontal") || has("layoutSizingVertical"))) {
+    remeasureText(node);
   }
 
   // --- variable bindings, last so layout and size are already set: { field: "collection/name" | null }
@@ -383,6 +671,17 @@ async function createNodeTree(spec, parent, created, anim) {
     case "LINE": node = figma.createLine(); break;
     case "POLYGON": node = figma.createPolygon(); break;
     case "STAR": node = figma.createStar(); break;
+    case "VECTOR":
+      if (spec.vectorPaths === undefined && spec.path === undefined) throw new Error('VECTOR node needs spec.vectorPaths (or spec.path) with SVG path data, e.g. path: "M 0 0 L 10 0 L 5 8 Z"');
+      node = figma.createVector();
+      break;
+    case "SVG":
+      // spec.svg = SVG markup; Figma turns it into a frame holding editable vectors
+      if (typeof spec.svg !== "string" || spec.svg.indexOf("<svg") === -1) {
+        throw new Error("SVG node needs spec.svg (an SVG markup string starting with <svg)");
+      }
+      node = figma.createNodeFromSvg(spec.svg);
+      break;
     default: throw new Error("Unsupported node type: " + type);
   }
   parent.appendChild(node);
@@ -422,8 +721,44 @@ function simplifyPaints(paints) {
       return sp;
     }
     if (p.type === "IMAGE") return { type: "IMAGE", imageHash: p.imageHash, scaleMode: p.scaleMode };
+    if (p.type === "GRADIENT_LINEAR" || p.type === "GRADIENT_RADIAL") {
+      var gp = { type: p.type };
+      if (p.type === "GRADIENT_LINEAR" && p.gradientTransform) gp.angle = gradientAngle(p.gradientTransform);
+      gp.stops = (p.gradientStops || []).map(function (s) {
+        return { position: round(s.position), color: rgbToHex(s.color, s.color.a === undefined ? 1 : s.color.a) };
+      });
+      return gp;
+    }
     return { type: p.type };
   });
+}
+
+// Inverse of the angle used when creating a linear gradient (same convention: 0 = left to right,
+// 90 = top to bottom, clockwise).
+function gradientAngle(t) {
+  var a = (Math.atan2(t[0][1], t[0][0]) * 180) / Math.PI;
+  if (a < 0) a += 360;
+  return Math.round(a * 100) / 100;
+}
+
+// Effects use the same format figma_create accepts: { type, color, opacity, x, y, blur, spread }.
+function serializeEffect(e) {
+  var o;
+  if (e.type === "LAYER_BLUR" || e.type === "BACKGROUND_BLUR") {
+    o = { type: e.type, blur: e.radius };
+  } else {
+    o = {
+      type: e.type,
+      color: rgbToHex(e.color),
+      opacity: round(e.color.a === undefined ? 1 : e.color.a),
+      x: e.offset ? e.offset.x : 0,
+      y: e.offset ? e.offset.y : 0,
+      blur: e.radius,
+      spread: e.spread || 0,
+    };
+  }
+  if (e.visible === false) o.visible = false;
+  return o;
 }
 
 function serialize(node, depth) {
@@ -441,6 +776,8 @@ function serialize(node, depth) {
     o.strokeWeight = node.strokeWeight;
   }
   if ("cornerRadius" in node && node.cornerRadius !== 0) o.cornerRadius = node.cornerRadius === figma.mixed ? "mixed" : node.cornerRadius;
+  if ("effects" in node && Array.isArray(node.effects) && node.effects.length) o.effects = node.effects.map(serializeEffect);
+  if ("layoutPositioning" in node && node.layoutPositioning === "ABSOLUTE") o.layoutPositioning = "ABSOLUTE";
   if ("layoutMode" in node && node.layoutMode !== "NONE") {
     o.layoutMode = node.layoutMode;
     o.itemSpacing = node.itemSpacing;
@@ -456,6 +793,8 @@ function serialize(node, depth) {
     o.characters = node.characters;
     o.fontSize = node.fontSize === figma.mixed ? "mixed" : node.fontSize;
     o.fontName = node.fontName === figma.mixed ? "mixed" : node.fontName;
+    var runs = serializeRuns(node);
+    if (runs) o.runs = runs;
   }
   if (node.boundVariables) {
     var bound = {};
@@ -467,8 +806,13 @@ function serialize(node, depth) {
     if (Object.keys(bound).length) o.bound = bound;
   }
   if ("children" in node) {
-    if (depth > 0) o.children = node.children.map(function (c) { return serialize(c, depth - 1); });
-    else o.childCount = node.children.length;
+    if (depth > 0) {
+      o.children = node.children.map(function (c) {
+        // one unreadable child must not make the whole call fail
+        try { return serialize(c, depth - 1); }
+        catch (e) { return { id: c.id, name: c.name, type: c.type, error: String((e && e.message) || e) }; }
+      });
+    } else o.childCount = node.children.length;
   }
   return o;
 }
@@ -696,6 +1040,38 @@ var handlers = {
     return serialize(node, depth);
   },
 
+  // Direct children of a page or node: id, name, type, position and size. With no id: the current
+  // page; with pageName: that page (works for pages other than the one that is open).
+  list_children: async function (p) {
+    var node;
+    if (p.id) {
+      node = await getNode(p.id);
+    } else if (p.pageName) {
+      var pages = figma.root.children;
+      var wanted = String(p.pageName).toLowerCase();
+      node = pages.filter(function (pg) { return pg.name.toLowerCase() === wanted; })[0];
+      if (!node) {
+        throw new Error('Page "' + p.pageName + '" not found. Pages in this file: ' +
+          pages.map(function (pg) { return '"' + pg.name + '"'; }).join(", "));
+      }
+      if (typeof node.loadAsync === "function") await node.loadAsync();
+    } else {
+      node = figma.currentPage;
+    }
+    if (!("children" in node)) throw new Error("Node " + node.id + " (" + node.type + ") has no children");
+    return {
+      id: node.id, name: node.name, type: node.type,
+      children: node.children.map(function (c) {
+        var o = { id: c.id, name: c.name, type: c.type };
+        if ("x" in c) { o.x = round(c.x); o.y = round(c.y); }
+        if ("width" in c) { o.width = round(c.width); o.height = round(c.height); }
+        if ("visible" in c && c.visible === false) o.visible = false;
+        if ("children" in c) o.childCount = c.children.length;
+        return o;
+      }),
+    };
+  },
+
   create: async function (p) {
     if (!p.spec) throw new Error("spec is required");
     var parent = await getParent(p.parentId);
@@ -703,17 +1079,23 @@ var handlers = {
     var animate = p.animate === undefined ? settings.animate : !!p.animate;
     var anim = animate ? [] : null;
     var root;
+    fontFallback = typeof p.fallbackFont === "string" && p.fallbackFont ? p.fallbackFont : null;
+    fontSubstitutions = [];
     try {
       root = await createNodeTree(p.spec, parent, created, anim);
       if (anim) await revealNodes(anim, p.speed || settings.speed, root, p.select !== false);
     } finally {
+      fontFallback = null;
       if (anim) restoreOpacity(anim); // never leave anything transparent, even on error
     }
+    placeAt(parent, root, p.index); // insert at a position instead of the end of the parent
     if (p.select !== false) {
       figma.currentPage.selection = [root];
       figma.viewport.scrollAndZoomIntoView([root]);
     }
-    return { rootId: root.id, created: created };
+    var out = { rootId: root.id, created: created };
+    if (fontSubstitutions.length) out.fontSubstitutions = fontSubstitutions.slice();
+    return out;
   },
 
   update: async function (p) {
@@ -723,9 +1105,146 @@ var handlers = {
       var newParent = await getParent(props.parentId);
       if (typeof props.index === "number") newParent.insertChild(props.index, node);
       else newParent.appendChild(node);
+    } else if (typeof props.index === "number" && node.parent) {
+      placeAt(node.parent, node, props.index); // reorder inside the current parent
+    }
+    if (typeof props.rescale === "number" && props.rescale > 0 && typeof node.rescale === "function") {
+      node.rescale(props.rescale); // scale the node and everything in it (like the K tool)
     }
     await applyProps(node, props, false);
     return serialize(node, 0);
+  },
+
+  boolean: async function (p) {
+    var fnName = { UNION: "union", SUBTRACT: "subtract", INTERSECT: "intersect", EXCLUDE: "exclude" };
+    var op = String(p.operation || "").toUpperCase();
+    if (!fnName[op]) throw new Error("operation must be UNION, SUBTRACT, INTERSECT or EXCLUDE");
+    if (!Array.isArray(p.ids) || p.ids.length < 2) throw new Error("ids needs at least 2 node ids");
+    var parts = [];
+    for (var i = 0; i < p.ids.length; i++) {
+      var part = await getNode(p.ids[i]);
+      if (part.type === "PAGE" || part.type === "DOCUMENT") throw new Error("A page cannot be combined: " + p.ids[i]);
+      parts.push(part);
+    }
+    var parent = p.parentId ? await getParent(p.parentId) : parts[0].parent;
+    var result = figma[fnName[op]](parts, parent, p.index);
+    if (p.flatten) result = figma.flatten([result], parent);
+    if (p.name) result.name = String(p.name);
+    if (p.props) await applyProps(result, p.props, false);
+    if (p.select !== false) figma.currentPage.selection = [result];
+    return serialize(result, 0);
+  },
+
+  create_variables: async function (p) {
+    if (!figma.variables) throw new Error("This Figma version has no variables API");
+    if (!Array.isArray(p.collections) || p.collections.length === 0) throw new Error("collections is required: [{ name, modes?, variables: [{ name, type?, values }] }]");
+    var cols = await figma.variables.getLocalVariableCollectionsAsync();
+    var existing = await figma.variables.getLocalVariablesAsync();
+    var colById = {};
+    cols.forEach(function (c) { colById[c.id] = c; });
+    var byKey = {};
+    existing.forEach(function (v) { var c = colById[v.variableCollectionId]; if (c) byKey[c.name + "/" + v.name] = v; });
+    var stats = { collectionsCreated: 0, variablesCreated: 0, variablesUpdated: 0, valuesSet: 0, aliasesSet: 0 };
+    var pending = [], summary = [];
+
+    var inferType = function (val) {
+      if (typeof val === "number") return "FLOAT";
+      if (typeof val === "boolean") return "BOOLEAN";
+      if (typeof val === "string" && /^#[0-9a-fA-F]{3,8}$/.test(val.trim())) return "COLOR";
+      return "STRING";
+    };
+    var convert = function (type, val, label) {
+      if (type === "COLOR") return hexToRgba(val);
+      if (type === "FLOAT") {
+        if (typeof val !== "number" || !isFinite(val)) throw new Error(label + ": FLOAT needs a number, got " + JSON.stringify(val));
+        return val;
+      }
+      if (type === "BOOLEAN") {
+        if (typeof val !== "boolean") throw new Error(label + ": BOOLEAN needs true or false, got " + JSON.stringify(val));
+        return val;
+      }
+      return String(val);
+    };
+
+    for (var ci = 0; ci < p.collections.length; ci++) {
+      var cs = p.collections[ci];
+      if (!cs || typeof cs.name !== "string" || !cs.name) throw new Error("collections[" + ci + "] needs a name");
+      var col = null;
+      for (var k = 0; k < cols.length; k++) if (cols[k].name === cs.name) col = cols[k];
+      var modeNames = Array.isArray(cs.modes) ? cs.modes.map(String) : [];
+      if (!col) {
+        col = figma.variables.createVariableCollection(cs.name);
+        cols.push(col);
+        stats.collectionsCreated++;
+        if (modeNames.length) col.renameMode(col.modes[0].modeId, modeNames[0]); // the default mode becomes the first one
+      }
+      modeNames.forEach(function (mn) {
+        if (!col.modes.some(function (m) { return m.name === mn; })) col.addMode(mn);
+      });
+      var modeId = function (name) {
+        for (var mi = 0; mi < col.modes.length; mi++) if (col.modes[mi].name === name) return col.modes[mi].modeId;
+        throw new Error('Mode "' + name + '" does not exist in collection "' + cs.name + '". Modes: ' + col.modes.map(function (m) { return m.name; }).join(", "));
+      };
+      var list = Array.isArray(cs.variables) ? cs.variables : [];
+      for (var vi = 0; vi < list.length; vi++) {
+        var vs = list[vi];
+        var label = cs.name + "/" + (vs && vs.name);
+        if (!vs || typeof vs.name !== "string" || !vs.name) throw new Error("collections[" + ci + "].variables[" + vi + "] needs a name");
+        var vals = vs.values !== undefined ? vs.values : vs.value;
+        var plain = vals !== null && typeof vals === "object" && !vals.alias;
+        var type = vs.type ? String(vs.type).toUpperCase() : null;
+        if (!type && vals !== undefined) {
+          // infer from the first literal value; if every value is an alias, from an existing target
+          var candidates = plain ? Object.keys(vals).map(function (mk0) { return vals[mk0]; }) : [vals];
+          for (var ti = 0; ti < candidates.length && !type; ti++) {
+            var cand = candidates[ti];
+            if (cand && typeof cand === "object" && cand.alias) { if (byKey[cand.alias]) type = byKey[cand.alias].resolvedType; }
+            else type = inferType(cand);
+          }
+          if (!type) throw new Error(label + ': give a type (COLOR, FLOAT, STRING or BOOLEAN): every value is an alias to a variable that does not exist yet');
+        }
+        if (!type) throw new Error(label + ": give a type (COLOR, FLOAT, STRING or BOOLEAN) when there is no value");
+        if (["COLOR", "FLOAT", "STRING", "BOOLEAN"].indexOf(type) < 0) throw new Error(label + ': type must be COLOR, FLOAT, STRING or BOOLEAN (got "' + vs.type + '")');
+        // validate everything before touching the file, so a bad value leaves no half-made variable
+        var perMode = vals === undefined ? {} : plain ? vals : (function () { var o = {}; o[col.modes[0].name] = vals; return o; })();
+        var writes = Object.keys(perMode).map(function (modeName) {
+          var mval = perMode[modeName], isAlias = !!(mval && typeof mval === "object" && mval.alias);
+          return { modeId: modeId(modeName), alias: isAlias ? mval.alias : null, value: isAlias ? null : convert(type, mval, label + " (" + modeName + ")") };
+        });
+        var variable = byKey[label];
+        if (variable) {
+          if (variable.resolvedType !== type) throw new Error(label + " already exists as " + variable.resolvedType + ", not " + type);
+          stats.variablesUpdated++;
+        } else {
+          variable = figma.variables.createVariable(vs.name, col, type);
+          byKey[label] = variable;
+          stats.variablesCreated++;
+        }
+        if (vs.description !== undefined) variable.description = String(vs.description);
+        if (vs.scopes !== undefined) variable.scopes = vs.scopes;
+        writes.forEach(function (w) {
+          if (w.alias) { pending.push({ variable: variable, modeId: w.modeId, ref: w.alias, label: label }); return; }
+          variable.setValueForMode(w.modeId, w.value);
+          stats.valuesSet++;
+        });
+      }
+      summary.push({ name: cs.name, modes: col.modes.map(function (m) { return m.name; }), variables: list.length });
+    }
+
+    // aliases last: the target may live in a collection that was created after the alias
+    for (var pi = 0; pi < pending.length; pi++) {
+      var pa = pending[pi], target = byKey[pa.ref];
+      if (!target) {
+        var tail = String(pa.ref).split("/").pop();
+        var near = Object.keys(byKey).filter(function (key) { return key.indexOf(tail) >= 0; }).slice(0, 5);
+        throw new Error(pa.label + ': alias target "' + pa.ref + '" not found. Use "collection/name".' + (near.length ? " Similar: " + near.join(", ") : ""));
+      }
+      if (target.resolvedType !== pa.variable.resolvedType) throw new Error(pa.label + ": cannot alias " + pa.ref + " (" + target.resolvedType + ") from a " + pa.variable.resolvedType + " variable");
+      pa.variable.setValueForMode(pa.modeId, figma.variables.createVariableAlias(target));
+      stats.aliasesSet++;
+    }
+    varCache = null;
+    return Object.assign(stats, { collections: summary });
   },
 
   delete: async function (p) {
@@ -741,6 +1260,7 @@ var handlers = {
     var node = await getNode(p.id);
     var copy = node.clone();
     if (p.parentId) (await getParent(p.parentId)).appendChild(copy);
+    if (copy.parent) placeAt(copy.parent, copy, p.index); // no-op without index
     if (typeof p.x === "number") copy.x = p.x;
     if (typeof p.y === "number") copy.y = p.y;
     return serialize(copy, 0);
@@ -778,6 +1298,16 @@ var handlers = {
     if (!("exportAsync" in node)) throw new Error("Node " + p.id + " cannot be exported");
     var format = p.format || "PNG";
     var scale = p.scale || 1;
+    if (format === "SVG") {
+      // vector export: text becomes outlines unless outlineText is false, so the shape matches the design
+      var svg = await node.exportAsync({
+        format: "SVG_STRING",
+        svgOutlineText: p.outlineText !== false,
+        svgIdAttribute: !!p.includeIds,
+        svgSimplifyStroke: true,
+      });
+      return { svg: svg, name: node.name, width: Math.round(node.width), height: Math.round(node.height) };
+    }
     var bytes = await node.exportAsync({ format: format, constraint: { type: "SCALE", value: scale } });
     return {
       base64: figma.base64Encode(bytes),
@@ -812,7 +1342,7 @@ figma.ui.onmessage = async function (msg) {
     var handler = handlers[msg.command];
     if (!handler) throw new Error("Unknown command: " + msg.command);
     var result = await handler(msg.params || {});
-    figma.ui.postMessage({ id: msg.id, ok: true, result: result });
+    figma.ui.postMessage({ id: msg.id, ok: true, result: clean(result) });
   } catch (e) {
     figma.ui.postMessage({ id: msg.id, ok: false, error: String((e && e.message) || e) });
   }

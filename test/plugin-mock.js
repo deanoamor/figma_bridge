@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 let idc = 0;
 const mixed = Symbol("mixed");
 const opacityLog = []; // every opacity write: { id, v }
+const textResizeLog = []; // every textAutoResize write: { id, v }
 class Node {
   get variantGroupProperties() {
     if (this.type !== "COMPONENT_SET") return null;
@@ -30,13 +31,20 @@ class Node {
   }
   async setEffectStyleIdAsync(id) { this.effectStyleId = id; }
   async setTextStyleIdAsync(id) { this.textStyleId = id; }
+  get x() { return this._x; }
+  set x(v) { if (this._inFlow()) return; this._x = v; }
+  get y() { return this._y; }
+  set y(v) { if (this._inFlow()) return; this._y = v; }
+  _inFlow() { return !!(this.parent && this.parent.layoutMode && this.parent.layoutMode !== "NONE" && this.layoutPositioning !== "ABSOLUTE"); }
+  get textAutoResize() { return this._tar; }
+  set textAutoResize(v) { this._tar = v; textResizeLog.push({ id: this.id, v }); }
   get opacity() { return this._o; }
   set opacity(v) { this._o = v; opacityLog.push({ id: this.id, v }); }
   constructor(type) {
     this.id = `1:${++idc}`; this.type = type; this.name = type; this.parent = null;
     this.x = 0; this.y = 0; this.width = 100; this.height = 100; this._o = 1; this.rotation = 0;
     this.fills = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }]; this.strokes = []; this.strokeWeight = 1;
-    this.effects = []; this.cornerRadius = 0; this.visible = true; this.boundVariables = {};
+    this.constraints = { horizontal: "MIN", vertical: "MIN" }; this.effects = []; this.cornerRadius = 0; this.visible = true; this.boundVariables = {};
     if (type === "COMPONENT" || type === "COMPONENT_SET") this.description = "";
     if (type === "VECTOR") { this.fills = []; this.strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }]; }
     if (type === "FRAME" || type === "COMPONENT" || type === "COMPONENT_SET" || type === "INSTANCE") {
@@ -47,6 +55,7 @@ class Node {
     if (type === "TEXT") { this.characters = ""; this.fontSize = 12; this.fontName = { family: "Inter", style: "Regular" }; this.textAutoResize = "WIDTH_AND_HEIGHT"; }
     if (type === "PAGE") { this.children = []; this.selection = []; }
   }
+  async loadAsync() { this.loaded = true; }
   appendChild(c) { if (c.parent) c.parent.children.splice(c.parent.children.indexOf(c), 1); c.parent = this; this.children.push(c); }
   insertChild(i, c) { this.appendChild(c); this.children.splice(i, 0, this.children.pop()); }
   resize(w, h) { this.width = w; this.height = h; }
@@ -63,17 +72,46 @@ class Node {
     if (variable) { this[field] = variable.value; this.boundVariables[field] = { type: "VARIABLE_ALIAS", id: variable.id }; }
     else delete this.boundVariables[field];
   }
-  async exportAsync() { return new Uint8Array([1, 2, 3]); }
+  _chars() {
+    const n = this.characters.length;
+    if (!this._cs || this._cs.length !== n) {
+      this._cs = Array.from({ length: n }, () => ({ fontSize: this.fontSize, fontName: this.fontName, fills: this.fills, textDecoration: "NONE", letterSpacing: { unit: "PIXELS", value: 0 }, lineHeight: { unit: "AUTO" } }));
+    }
+    return this._cs;
+  }
+  _setRange(a, b, k, v) { const cs = this._chars(); for (let i = a; i < b; i++) cs[i] = { ...cs[i], [k]: v }; }
+  setRangeFontName(a, b, v) { this._setRange(a, b, "fontName", v); }
+  setRangeFontSize(a, b, v) { this._setRange(a, b, "fontSize", v); }
+  setRangeFills(a, b, v) { this._setRange(a, b, "fills", v); }
+  setRangeTextDecoration(a, b, v) { this._setRange(a, b, "textDecoration", v); }
+  setRangeLetterSpacing(a, b, v) { this._setRange(a, b, "letterSpacing", v); }
+  setRangeLineHeight(a, b, v) { this._setRange(a, b, "lineHeight", v); }
+  getRangeFontName(a, b) {
+    const cs = this._chars().slice(a, b), f = cs[0].fontName;
+    return cs.every((c) => c.fontName.family === f.family && c.fontName.style === f.style) ? f : mixed;
+  }
+  getStyledTextSegments(keys) {
+    const cs = this._chars(), segs = [];
+    cs.forEach((c, i) => {
+      const pick = Object.fromEntries(keys.map((k) => [k, c[k]]));
+      const last = segs[segs.length - 1];
+      if (last && JSON.stringify(last.pick) === JSON.stringify(pick)) { last.end = i + 1; }
+      else segs.push({ start: i, end: i + 1, pick });
+    });
+    return segs.map((g) => ({ characters: this.characters.slice(g.start, g.end), start: g.start, end: g.end, ...g.pick }));
+  }
+  async exportAsync(o) { return o && o.format === "SVG_STRING" ? `<svg xmlns="http://www.w3.org/2000/svg" data-outline="${o.svgOutlineText}" data-ids="${o.svgIdAttribute}"><path d="M0 0"/></svg>` : new Uint8Array([1, 2, 3]); }
 }
 const nodes = new Map();
 const reg = (n) => (nodes.set(n.id, n), n);
 const page = reg(new Node("PAGE")); page.name = "Page 1";
+const page2 = reg(new Node("PAGE")); page2.name = "Web Flow";
 const sent = [];
 const fontsLoaded = [];
 const effectStyles = [];
 const textStyles = [];
 const svgImported = [];
-const mkVar = (o) => ({ description: "", scopes: [], values: {}, setValueForMode(m, val) { this.values[m] = val; }, ...o });
+const mkVar = (o) => ({ description: "", scopes: [], values: {}, get valuesByMode() { return this.values; }, setValueForMode(m, val) { this.values[m] = val; }, ...o });
 const varList = [
   mkVar({ id: "V:1", name: "radius/md", resolvedType: "FLOAT", value: 12, variableCollectionId: "VC:1" }),
   mkVar({ id: "V:2", name: "space/2", resolvedType: "FLOAT", value: 8, variableCollectionId: "VC:1" }),
@@ -82,13 +120,36 @@ const varList = [
   mkVar({ id: "V:5", name: "ring", resolvedType: "COLOR", variableCollectionId: "VC:2" }), // no dark/ring on purpose
 ];
 const figma = {
-  mixed, currentPage: page, root: { name: "Test file", children: [page] },
+  mixed, currentPage: page, root: { name: "Test file", children: [page, page2] },
   viewport: { scrollAndZoomIntoView() {} },
   createFrame: () => reg(new Node("FRAME")), createComponent: () => reg(new Node("COMPONENT")), createRectangle: () => reg(new Node("RECTANGLE")),
   createEllipse: () => reg(new Node("ELLIPSE")), createText: () => reg(new Node("TEXT")),
+  createNodeFromSvg: (svg) => { const n = reg(new Node("FRAME")); n.name = "svg"; n.svgSource = svg; return n; },
+  createVector: () => reg(new Node("VECTOR")),
+  _bool(op) {
+    return (parts, parent, index) => {
+      if (!parent) throw new Error("no parent");
+      const b = reg(new Node("BOOLEAN_OPERATION")); b.children = []; b.booleanOperation = op; b.fills = [];
+      parent.appendChild(b);
+      parts.forEach((c) => b.appendChild(c));
+      if (typeof index === "number") parent.insertChild(index, b);
+      return b;
+    };
+  },
+  union(...a) { return this._bool("UNION")(...a); }, subtract(...a) { return this._bool("SUBTRACT")(...a); },
+  intersect(...a) { return this._bool("INTERSECT")(...a); }, exclude(...a) { return this._bool("EXCLUDE")(...a); },
+  flatten(parts, parent) {
+    const v = reg(new Node("VECTOR")); v.flattenedFrom = parts[0].type; parent.appendChild(v);
+    parts.forEach((c) => c.remove());
+    return v;
+  },
   createLine: () => reg(new Node("LINE")), createPolygon: () => reg(new Node("POLYGON")), createStar: () => reg(new Node("STAR")),
   getNodeByIdAsync: async (id) => nodes.get(id) || null,
-  loadFontAsync: async (f) => { if (f.family === "Nope") throw new Error("x"); fontsLoaded.push(`${f.family} ${f.style}`); },
+  loadFontAsync: async (f) => {
+    // Poppins calls it "SemiBold", Inter "Semi Bold"; unknown families do not exist
+    if (f.family === "Nope" || f.family === "Missing Sans" || f.family === "Also Missing" || (f.family === "Poppins" && f.style === "Semi Bold") || (f.family === "Inter" && f.style === "SemiBold")) throw new Error("x");
+    fontsLoaded.push(`${f.family} ${f.style}`);
+  },
   base64Encode: (b) => Buffer.from(b).toString("base64"),
   base64Decode: (s) => new Uint8Array(Buffer.from(s, "base64")),
   createImage: (bytes) => {
@@ -106,22 +167,29 @@ const figma = {
     comps.forEach((c) => set.appendChild(c));
     return set;
   },
-  variables: {
-    getLocalVariableCollectionsAsync: async () => [
-      { id: "VC:1", name: "core", modes: [{ modeId: "m:1", name: "Mode 1" }] },
-      { id: "VC:2", name: "light", modes: [{ modeId: "m:2", name: "Light" }] },
-      { id: "VC:3", name: "dark", modes: [{ modeId: "m:3", name: "Dark" }] },
-    ],
-    getLocalVariablesAsync: async () => varList,
-    createVariable: (name, col, type) => {
-      const v = mkVar({ id: `V:${varList.length + 1}`, name, resolvedType: type, variableCollectionId: col.id });
-      varList.push(v);
-      return v;
-    },
-    createVariableAlias: (v) => ({ type: "VARIABLE_ALIAS", id: v.id }),
-    setBoundVariableForEffect: (effect, field, variable) => ({ ...effect, boundVariables: { [field]: { type: "VARIABLE_ALIAS", id: variable.id } } }),
+  variables: (() => {
+    let vc = 10, mm = 10;
+    const mkCol = (id, name, modes, ids) => ({
+      id, name, modes: modes.map((n, i) => ({ modeId: ids ? ids[i] : `M:${++mm}`, name: n })),
+      renameMode(modeId, n) { this.modes.find((m) => m.modeId === modeId).name = n; },
+      addMode(n) { const m = { modeId: `M:${++mm}`, name: n }; this.modes.push(m); return m.modeId; },
+    });
+    const collections = [mkCol("VC:1", "core", ["Mode 1"], ["m:1"]), mkCol("VC:2", "light", ["Light"], ["m:2"]), mkCol("VC:3", "dark", ["Dark"], ["m:3"])];
+    return {
+      getLocalVariableCollectionsAsync: async () => collections.slice(),
+      getLocalVariablesAsync: async () => varList,
+      createVariableCollection(name) { const c = mkCol(`VC:${++vc}`, name, ["Mode 1"]); collections.push(c); return c; },
+      createVariable: (name, col, type) => {
+        if (!col || !col.modes) throw new Error("createVariable needs a collection node");
+        const v = mkVar({ id: `V:${varList.length + 1}`, name, resolvedType: type, variableCollectionId: col.id });
+        varList.push(v);
+        return v;
+      },
+      createVariableAlias: (v) => ({ type: "VARIABLE_ALIAS", id: v.id }),
+      setBoundVariableForEffect: (effect, field, variable) => ({ ...effect, boundVariables: { [field]: { type: "VARIABLE_ALIAS", id: variable.id } } }),
     setBoundVariableForPaint: (paint, field, variable) => ({ ...paint, boundVariables: { [field]: { type: "VARIABLE_ALIAS", id: variable.id } } }),
-  },
+    };
+  })(),
   showUI() {}, ui: { postMessage: (m) => sent.push(m), onmessage: null },
 };
 // Fake auto-layout behaviour: a child's layoutSizing* only exists inside an auto-layout parent
@@ -628,5 +696,407 @@ r = await call("create_effect_style", { name: "focus-ring", effects: [{ type: "D
 assert.equal(r.ok, true, r.error);
 assert.equal(effectStyles.find((e) => e.name === "focus-ring").effects[0].boundVariables.color.id, "V:5");
 console.log("ok: description, text styles, effect colors");
+// ======================= improvements from real use (phase 1)
+{
+  const make = (spec, params = {}) => call("create", { spec, animate: false, ...params });
+  const J = (v) => JSON.stringify(v); // vm objects are cross-realm: compare through JSON
+
+  // SVG node, and exporting a node as SVG
+  r = await make({ type: "SVG", name: "OVO", svg: '<svg viewBox="0 0 10 10"><path d="M0 0"/></svg>' });
+  assert.equal(r.ok, true, r.error);
+  const svgNode = nodes.get(r.result.rootId);
+  assert.match(svgNode.svgSource, /<svg/);
+  r = await make({ type: "SVG" });
+  assert.equal(r.ok, false); assert.match(r.error, /needs spec.svg/);
+  r = await call("export", { id: svgNode.id, format: "SVG" });
+  assert.equal(r.ok, true, r.error);
+  assert.match(r.result.svg, /^<svg/); assert.equal(r.result.base64, undefined);
+  assert.match(r.result.svg, /data-outline="true"/); assert.match(r.result.svg, /data-ids="false"/);
+  r = await call("export", { id: svgNode.id, format: "SVG", outlineText: false, includeIds: true });
+  assert.match(r.result.svg, /data-outline="false"/); assert.match(r.result.svg, /data-ids="true"/);
+  r = await call("export", { id: svgNode.id });
+  assert.equal(r.result.mimeType, "image/png"); // PNG unchanged
+  console.log("ok: SVG node + export SVG");
+
+  // effects are readable, in the same format figma_create takes
+  const fx = [
+    { type: "DROP_SHADOW", color: "#112233", opacity: 0.3, x: 1, y: 2, blur: 8, spread: 1 },
+    { type: "INNER_SHADOW", color: "#000000", opacity: 0.25, x: 0, y: 1, blur: 2, spread: 0 },
+    { type: "LAYER_BLUR", blur: 4 },
+  ];
+  r = await make({ type: "RECTANGLE", effects: fx });
+  const fxId = r.result.rootId;
+  r = await call("get_node", { id: fxId, depth: 0 });
+  assert.equal(J(r.result.effects), J(fx));
+  r = await call("update", { id: fxId, props: { effects: [] } });
+  r = await call("get_node", { id: fxId, depth: 0 });
+  assert.equal(r.result.effects, undefined);
+  console.log("ok: effects round trip");
+
+  // index on create / clone / update
+  r = await make({ type: "FRAME", name: "List", layoutMode: "VERTICAL", children: ["A", "B", "C"].map((n) => ({ type: "TEXT", name: n, characters: n })) });
+  const list = nodes.get(r.result.rootId);
+  const order = () => list.children.map((c) => c.name).join(",");
+  r = await make({ type: "TEXT", name: "X", characters: "x" }, { parentId: list.id, index: 1 });
+  assert.equal(order(), "A,X,B,C");
+  const xId = r.result.rootId;
+  r = await make({ type: "TEXT", name: "Y", characters: "y" }, { parentId: list.id, index: 0 });
+  assert.equal(order(), "Y,A,X,B,C");
+  const yId = r.result.rootId;
+  r = await make({ type: "TEXT", name: "Z", characters: "z" }, { parentId: list.id, index: 99 });
+  assert.equal(order(), "Y,A,X,B,C,Z"); // clamped to the end
+  r = await call("clone", { id: xId, index: 0 });
+  assert.equal(r.ok, true, r.error); assert.equal(list.children[0].id, r.result.id);
+  r = await call("delete", { ids: [r.result.id] });
+  r = await call("update", { id: yId, props: { index: 3 } });
+  assert.equal(list.children.indexOf(nodes.get(yId)), 3);
+  r = await call("update", { id: yId, props: { index: 0 } });
+  assert.equal(list.children[0].id, yId);
+  // Figma's insertChild may count the moved node (index before removal): the result must still be the requested index
+  const realInsert = Node.prototype.insertChild;
+  Node.prototype.insertChild = function (i, c) {
+    const before = this.children.indexOf(c);
+    this.appendChild(c); const moved = this.children.pop();
+    this.children.splice(before >= 0 && before < i ? i - 1 : i, 0, moved);
+  };
+  r = await call("update", { id: yId, props: { index: 3 } });
+  Node.prototype.insertChild = realInsert;
+  assert.equal(list.children.indexOf(nodes.get(yId)), 3, "index is correct even with the other insertChild semantics");
+  console.log("ok: index on create / clone / update");
+
+  // text is re-measured after width / font changes, and the auto-resize mode is restored
+  r = await make({ type: "TEXT", name: "Title", characters: "Judul yang panjang", fontSize: 20, width: 200 });
+  const title = nodes.get(r.result.rootId);
+  textResizeLog.length = 0;
+  r = await call("update", { id: title.id, props: { width: 300 } });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(J(textResizeLog.filter((e) => e.id === title.id).map((e) => e.v)), J(["HEIGHT", "NONE", "HEIGHT"]));
+  textResizeLog.length = 0;
+  r = await call("update", { id: title.id, props: { fontSize: 18 } });
+  assert.equal(J(textResizeLog.map((e) => e.v)), J(["NONE", "HEIGHT"]));
+  assert.equal(title.textAutoResize, "HEIGHT");
+  title.textAutoResize = "NONE"; textResizeLog.length = 0;
+  r = await call("update", { id: title.id, props: { fontSize: 16 } });
+  assert.equal(textResizeLog.length, 0, "fixed-size text is left alone");
+  console.log("ok: text re-measured after update");
+
+  // new auto-layout frames hug unless sized
+  r = await make({ type: "FRAME", layoutMode: "HORIZONTAL", children: [{ type: "TEXT", characters: "a" }] });
+  let f1 = nodes.get(r.result.rootId);
+  assert.equal(f1.layoutSizingHorizontal, "HUG"); assert.equal(f1.layoutSizingVertical, "HUG");
+  r = await make({ type: "FRAME", layoutMode: "VERTICAL", width: 300 });
+  f1 = nodes.get(r.result.rootId);
+  assert.equal(f1.layoutSizingHorizontal, "FIXED"); assert.equal(f1.layoutSizingVertical, "HUG");
+  assert.equal(f1.width, 300);
+  r = await make({ type: "FRAME", layoutMode: "HORIZONTAL", primaryAxisSizingMode: "FIXED" });
+  f1 = nodes.get(r.result.rootId);
+  assert.equal(f1.layoutSizingHorizontal, "FIXED"); assert.equal(f1.layoutSizingVertical, "HUG");
+  r = await make({ type: "FRAME", layoutMode: "VERTICAL", width: 500, children: [
+    { type: "FRAME", name: "row", layoutMode: "HORIZONTAL", layoutSizingHorizontal: "FILL", children: [{ type: "TEXT", characters: "x" }] },
+    { type: "FRAME", name: "pill", layoutMode: "HORIZONTAL", padding: 8, children: [{ type: "TEXT", characters: "tag" }] },
+  ] });
+  const col = nodes.get(r.result.rootId);
+  assert.equal(col.children[0].layoutSizingHorizontal, "FILL"); assert.equal(col.children[0].layoutSizingVertical, "HUG");
+  assert.equal(col.children[1].layoutSizingHorizontal, "HUG"); assert.equal(col.children[1].layoutSizingVertical, "HUG");
+  r = await make({ type: "FRAME", name: "plain", width: 120 });
+  assert.equal(nodes.get(r.result.rootId).width, 120); // no layoutMode: untouched
+  console.log("ok: auto-layout frames hug by default");
+
+  // gradient direction: direction / cssAngle / angle, readable back
+  const stops = [{ position: 0, color: "#000000CC" }, { position: 1, color: "#00000000" }];
+  const gradient = async (g) => {
+    const made = await make({ type: "RECTANGLE", fills: [{ type: "GRADIENT_LINEAR", stops, ...g }] });
+    assert.equal(made.ok, true, made.error);
+    return (await call("get_node", { id: made.result.rootId, depth: 0 })).result.fills[0];
+  };
+  const cases = [
+    [{ direction: "to right" }, 0], [{ direction: "to bottom" }, 90], [{ direction: "to left" }, 180], [{ direction: "to top" }, 270],
+    [{ direction: "to bottom right" }, 45], [{ direction: "left top" }, 225], [{ direction: "to top right" }, 315],
+    [{ cssAngle: 0 }, 270], [{ cssAngle: 90 }, 0], [{ cssAngle: 180 }, 90], [{ cssAngle: 270 }, 180], [{ cssAngle: 135 }, 45],
+    [{ angle: 90 }, 90], [{}, 0],
+  ];
+  for (const [g, expected] of cases) {
+    const f = await gradient(g);
+    assert.equal(f.angle, expected, J(g) + " -> " + f.angle);
+  }
+  const gf = await gradient({ direction: "to bottom" });
+  assert.equal(gf.type, "GRADIENT_LINEAR"); assert.equal(J(gf.stops), J([{ position: 0, color: "#000000CC" }, { position: 1, color: "#00000000" }]));
+  r = await make({ type: "RECTANGLE", fills: [{ type: "GRADIENT_LINEAR", stops, direction: "diagonal" }] });
+  assert.equal(r.ok, false); assert.match(r.error, /Unknown gradient direction/);
+  console.log("ok: gradient direction (direction / cssAngle / angle) and read back");
+
+  // absolute positioning inside an auto-layout parent: x/y must land
+  r = await make({ type: "FRAME", name: "Hero", layoutMode: "VERTICAL", width: 400, height: 300, children: [
+    { type: "TEXT", name: "flow", characters: "flow" },
+    { type: "RECTANGLE", name: "Laptop", width: 80, height: 50, layoutPositioning: "ABSOLUTE", x: 300, y: 220, constraints: { horizontal: "MAX", vertical: "MAX" } },
+  ] });
+  assert.equal(r.ok, true, r.error);
+  const laptop = nodes.get(r.result.created[2].id);
+  assert.equal(laptop.layoutPositioning, "ABSOLUTE");
+  assert.equal(laptop.x, 300); assert.equal(laptop.y, 220);
+  assert.equal(J(laptop.constraints), J({ horizontal: "MAX", vertical: "MAX" }));
+  r = await call("get_node", { id: laptop.id, depth: 0 });
+  assert.equal(r.result.x, 300); assert.equal(r.result.y, 220); assert.equal(r.result.layoutPositioning, "ABSOLUTE");
+  const flowText = nodes.get(r.result.id) && nodes.get(laptop.parent.children[0].id);
+  r = await call("update", { id: flowText.id, props: { layoutPositioning: "ABSOLUTE", x: 10, y: 20 } });
+  assert.equal(r.ok, true, r.error); assert.equal(flowText.x, 10); assert.equal(flowText.y, 20);
+  r = await make({ type: "FRAME", children: [{ type: "RECTANGLE", layoutPositioning: "ABSOLUTE" }] });
+  assert.equal(r.ok, false); assert.match(r.error, /needs a parent with auto layout/);
+  console.log("ok: ABSOLUTE positioning returns x/y");
+
+  // get_node survives figma.mixed and an unreadable child; unknown ids explain how to find ids
+  r = await make({ type: "FRAME", name: "Weird", children: [{ type: "RECTANGLE", name: "ok" }, { type: "RECTANGLE", name: "bad" }] });
+  const weird = nodes.get(r.result.rootId);
+  weird.children[0].strokes = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }];
+  weird.children[0].strokeWeight = mixed;
+  Object.defineProperty(weird.children[1], "fills", { get() { throw new Error("boom"); } });
+  r = await call("get_node", { id: weird.id, depth: 2 });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result.children[0].strokeWeight, "mixed");
+  assert.match(r.result.children[1].error, /boom/); assert.equal(r.result.children[1].name, "bad");
+  r = await call("get_node", { id: "9:99" });
+  assert.equal(r.ok, false); assert.match(r.error, /Node not found: 9:99/); assert.match(r.error, /figma_list_children/);
+  console.log("ok: get_node robust (mixed, unreadable child, helpful not-found)");
+
+  // list_children: current page, another page by name, by id
+  await make({ type: "FRAME", name: "On page 2" }, { parentId: page2.id });
+  r = await call("list_children", { pageName: "web flow" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result.name, "Web Flow"); assert.equal(r.result.children[0].name, "On page 2");
+  assert.equal(page2.loaded, true, "the page is loaded before its children are read");
+  assert.equal(r.result.children[0].type, "FRAME"); assert.equal(typeof r.result.children[0].width, "number");
+  r = await call("list_children", {});
+  assert.equal(r.result.name, "Page 1"); assert.ok(r.result.children.length > 3);
+  assert.ok(["id", "name", "type", "x", "y", "width", "height"].every((k) => k in r.result.children[0]));
+  r = await call("list_children", { id: page2.id });
+  assert.equal(r.result.children.length, 1);
+  r = await call("list_children", { pageName: "Nope" });
+  assert.equal(r.ok, false); assert.match(r.error, /Pages in this file: "Page 1", "Web Flow"/);
+  r = await call("list_children", { id: fxId });
+  assert.equal(r.ok, false); assert.match(r.error, /has no children/);
+  console.log("ok: list_children");
+}
+
+// ======================= improvements from real use (phase 2)
+{
+  const J = (v) => JSON.stringify(v);
+  const make = (spec, params = {}) => call("create", { spec, animate: false, ...params });
+
+  // VECTOR: path normalising
+  r = await make({ type: "VECTOR", name: "Tri", path: "M0 0 L40 0 l-20 30 z" });
+  assert.equal(r.ok, true, r.error);
+  let vec = nodes.get(r.result.rootId);
+  assert.equal(vec.type, "VECTOR");
+  assert.equal(J(vec.vectorPaths), J([{ windingRule: "NONZERO", data: "M 0 0 L 40 0 L 20 30 Z" }]));
+  assert.equal(J(vec.fills), J([{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }])); // visible by default
+  r = await make({ type: "VECTOR", width: 80, height: 60, strokes: "#FF0000", vectorPaths: [{ data: "M10,10H50V40h-40Z", windingRule: "EVENODD" }, "M0 0 C 0 10, 10 10, 10 0 S 20 -10 20 0 Q 25 5 30 0 T 40 0"] });
+  assert.equal(r.ok, true, r.error);
+  vec = nodes.get(r.result.rootId);
+  assert.equal(vec.vectorPaths[0].windingRule, "EVENODD");
+  assert.equal(vec.vectorPaths[0].data, "M 10 10 L 50 10 L 50 40 L 10 40 Z"); // H / V / relative h
+  assert.equal(vec.vectorPaths[1].data, "M 0 0 C 0 10 10 10 10 0 C 10 -10 20 -10 20 0 Q 25 5 30 0 Q 35 -5 40 0"); // S and T reflect the last control point
+  assert.equal(vec.width, 80); assert.equal(vec.fills.length, 1, "strokes only: default fill untouched"); // the mock's own default white fill
+  r = await make({ type: "VECTOR", path: "M 0 0 l 10 10 5 0 z" });
+  assert.equal(nodes.get(r.result.rootId).vectorPaths[0].data, "M 0 0 L 10 10 L 15 10 Z"); // implicit repeated lineto
+  for (const [bad, re] of [["M 0 0 A 5 5 0 0 1 10 10", /arc.*SVG/], ["L 1 1", /start with M/], ["M 0 0 X 3", /Unknown path command|unexpected/], ["M 0", /malformed/], ["M 0 0 L #", /unexpected characters/]]) {
+    r = await make({ type: "VECTOR", path: bad });
+    assert.equal(r.ok, false, bad); assert.match(r.error, re, bad);
+  }
+  r = await make({ type: "VECTOR" });
+  assert.equal(r.ok, false); assert.match(r.error, /needs spec.vectorPaths/);
+  r = await make({ type: "VECTOR", path: "M 0 0 L 1 1", vectorPaths: [{ data: "M 0 0 L 1 1", windingRule: "ODD" }] });
+  assert.equal(r.ok, false); assert.match(r.error, /windingRule/);
+  console.log("ok: VECTOR paths");
+
+  // figma_boolean
+  r = await make({ type: "FRAME", name: "Logo", children: [{ type: "ELLIPSE", name: "a" }, { type: "ELLIPSE", name: "b" }, { type: "RECTANGLE", name: "c" }] });
+  const logo = nodes.get(r.result.rootId);
+  const [ea, eb, rc] = logo.children;
+  r = await call("boolean", { operation: "subtract", ids: [ea.id, eb.id], name: "Crescent" });
+  assert.equal(r.ok, true, r.error);
+  const crescent = nodes.get(r.result.id);
+  assert.equal(crescent.type, "BOOLEAN_OPERATION"); assert.equal(crescent.booleanOperation, "SUBTRACT"); assert.equal(crescent.name, "Crescent");
+  assert.equal(crescent.children.length, 2); assert.equal(crescent.parent.id, logo.id);
+  assert.equal(J(page.selection.map((n) => n.id)), J([crescent.id]));
+  r = await call("boolean", { operation: "UNION", ids: [crescent.id, rc.id], flatten: true, name: "Mark", props: { x: 5 }, select: false, index: 0 });
+  assert.equal(r.ok, true, r.error);
+  const mark = nodes.get(r.result.id);
+  assert.equal(mark.type, "VECTOR"); assert.equal(mark.name, "Mark"); assert.equal(mark.x, 5);
+  assert.equal(J(page.selection.map((n) => n.id)), J([crescent.id]), "select:false leaves the selection alone");
+  for (const [args, re] of [[{ operation: "MERGE", ids: ["1:1", "1:2"] }, /operation must be/], [{ operation: "UNION", ids: ["1:1"] }, /at least 2/], [{ operation: "UNION", ids: [mark.id, "9:99"] }, /Node not found: 9:99/], [{ operation: "UNION", ids: [page.id, mark.id] }, /page cannot be combined/]]) {
+    r = await call("boolean", args);
+    assert.equal(r.ok, false); assert.match(r.error, re);
+  }
+  console.log("ok: figma_boolean");
+
+  // mixed text styles
+  r = await make({ type: "TEXT", name: "Promo", fontSize: 20, textColor: "#111111", runs: [
+    { text: "Hemat " },
+    { text: "30%", fontStyle: "Bold", color: "#E11D48", fontSize: 28, textDecoration: "UNDERLINE", letterSpacing: 0.5, lineHeight: 32 },
+    { text: " hari ini" },
+  ] });
+  assert.equal(r.ok, true, r.error);
+  const promo = nodes.get(r.result.rootId);
+  assert.equal(promo.characters, "Hemat 30% hari ini");
+  assert.ok(fontsLoaded.includes("Inter Bold"), "the run's font is loaded before use");
+  r = await call("get_node", { id: promo.id, depth: 0 });
+  assert.equal(r.result.characters, "Hemat 30% hari ini");
+  assert.equal(J(r.result.runs), J([
+    { text: "Hemat ", fontSize: 20, fontFamily: "Inter", fontStyle: "Regular", color: "#111111" },
+    { text: "30%", fontSize: 28, fontFamily: "Inter", fontStyle: "Bold", color: "#E11D48", textDecoration: "UNDERLINE", letterSpacing: 0.5, lineHeight: 32 },
+    { text: " hari ini", fontSize: 20, fontFamily: "Inter", fontStyle: "Regular", color: "#111111" },
+  ]));
+  // ranges on existing text (update), end exclusive
+  r = await make({ type: "TEXT", name: "Plain", characters: "Hello world", fontSize: 16 });
+  const plain = nodes.get(r.result.rootId);
+  r = await call("get_node", { id: plain.id, depth: 0 });
+  assert.equal(r.result.runs, undefined, "uniform text has no runs");
+  r = await call("update", { id: plain.id, props: { ranges: [{ start: 6, end: 11, fontStyle: "Bold", color: "#00FF00" }] } });
+  assert.equal(r.ok, true, r.error);
+  r = await call("get_node", { id: plain.id, depth: 0 });
+  assert.equal(J(r.result.runs.map((x) => [x.text, x.fontStyle])), J([["Hello ", "Regular"], ["world", "Bold"]]));
+  assert.equal(r.result.runs[1].color, "#00FF00");
+  // runs on update replace the content
+  textResizeLog.length = 0;
+  r = await call("update", { id: plain.id, props: { runs: [{ text: "A", fontSize: 10 }, { text: "B", fontSize: 30 }] } });
+  assert.equal(r.ok, true, r.error); assert.equal(plain.characters, "AB");
+  assert.ok(textResizeLog.length >= 2, "re-measured after runs");
+  for (const [props, re] of [[{ ranges: [{ start: 0, end: 99, fontSize: 9 }] }, /Text range 0 is invalid.*2 characters/], [{ ranges: [{ start: 1, end: 1, fontSize: 9 }] }, /invalid/], [{ runs: [] }, /non-empty/], [{ runs: [{ fontSize: 9 }] }, /needs a text string/], [{ ranges: "x" }, /ranges must be an array/]]) {
+    r = await call("update", { id: plain.id, props });
+    assert.equal(r.ok, false, J(props)); assert.match(r.error, re);
+  }
+  r = await make({ type: "TEXT", characters: "x", runs: [{ text: "y", fontFamily: "Nope" }] });
+  assert.equal(r.ok, false); assert.match(r.error, /Font "Nope/);
+  console.log("ok: mixed text styles (runs / ranges)");
+
+  // create_variables
+  const vars = await figma.variables.getLocalVariablesAsync();
+  const before = vars.length;
+  r = await call("create_variables", { collections: [
+    { name: "tokens", modes: ["Light", "Dark"], variables: [
+      { name: "color/primary", values: { Light: { alias: "palette/blue/500" }, Dark: "#60A5FA" }, description: "Brand color", scopes: ["ALL_FILLS"] },
+      { name: "color/bg", values: { Light: "#FFFFFF", Dark: "#0B1220CC" } },
+      { name: "radius/md", values: { Light: 12, Dark: 12 } },
+      { name: "label", type: "STRING", values: "Beli" },
+      { name: "enabled", values: { Dark: true, Light: false } },
+    ] },
+    { name: "palette", modes: ["Default"], variables: [
+      { name: "blue/500", values: "#3B82F6" },
+      { name: "space/4", values: 16 },
+    ] },
+  ] });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(J({ ...r.result, collections: undefined }), J({ collectionsCreated: 2, variablesCreated: 7, variablesUpdated: 0, valuesSet: 10, aliasesSet: 1 }));
+  assert.equal(J(r.result.collections), J([{ name: "tokens", modes: ["Light", "Dark"], variables: 5 }, { name: "palette", modes: ["Default"], variables: 2 }]));
+  const allVars = await figma.variables.getLocalVariablesAsync();
+  const allCols = await figma.variables.getLocalVariableCollectionsAsync();
+  assert.equal(allVars.length, before + 7);
+  const tokens = allCols.find((c) => c.name === "tokens"), palette = allCols.find((c) => c.name === "palette");
+  const mode = (c, n) => c.modes.find((m) => m.name === n).modeId;
+  const get = (col, name) => allVars.find((v) => v.variableCollectionId === col.id && v.name === name);
+  const prim = get(tokens, "color/primary");
+  assert.equal(prim.resolvedType, "COLOR"); assert.equal(prim.description, "Brand color"); assert.equal(J(prim.scopes), J(["ALL_FILLS"]));
+  assert.equal(J(prim.valuesByMode[mode(tokens, "Light")]), J({ type: "VARIABLE_ALIAS", id: get(palette, "blue/500").id }), "alias to a variable created later in the same call");
+  assert.equal(J(prim.valuesByMode[mode(tokens, "Dark")]), J({ r: 0x60 / 255, g: 0xa5 / 255, b: 0xfa / 255, a: 1 }));
+  const bg = get(tokens, "color/bg");
+  assert.ok(Math.abs(bg.valuesByMode[mode(tokens, "Dark")].a - 0xcc / 255) < 1e-9);
+  assert.equal(get(tokens, "radius/md").resolvedType, "FLOAT");
+  assert.equal(get(tokens, "label").valuesByMode[mode(tokens, "Light")], "Beli", "single value goes to the first mode");
+  assert.equal(get(tokens, "enabled").resolvedType, "BOOLEAN");
+  assert.equal(get(palette, "space/4").valuesByMode[mode(palette, "Default")], 16);
+  assert.equal(tokens.modes.length, 2); assert.equal(tokens.modes[0].name, "Light", "default mode renamed, not duplicated");
+  // idempotent: run again updates instead of duplicating; new mode and variable are added
+  r = await call("create_variables", { collections: [
+    { name: "tokens", modes: ["Light", "Dark", "Brand"], variables: [{ name: "radius/md", values: { Brand: 20 } }, { name: "radius/lg", values: 24 }] },
+  ] });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result.collectionsCreated, 0); assert.equal(r.result.variablesUpdated, 1); assert.equal(r.result.variablesCreated, 1);
+  assert.equal(tokens.modes.length, 3);
+  assert.equal((await figma.variables.getLocalVariablesAsync()).length, before + 8);
+  assert.equal(get(tokens, "radius/md").valuesByMode[mode(tokens, "Light")], 12, "other modes untouched");
+  assert.equal(get(tokens, "radius/md").valuesByMode[mode(tokens, "Brand")], 20);
+  // the new variables are usable right away
+  r = await make({ type: "RECTANGLE", fills: "var:tokens/color/bg" });
+  assert.equal(r.ok, true, r.error);
+  // errors
+  for (const [cols, re] of [
+    [[{ name: "tokens", variables: [{ name: "radius/md", type: "COLOR", values: "#fff" }] }], /already exists as FLOAT, not COLOR/],
+    [[{ name: "tokens", variables: [{ name: "x", values: { Nope: 1 } }] }], /Mode "Nope" does not exist.*Modes: Light, Dark, Brand/],
+    [[{ name: "tokens", variables: [{ name: "x", type: "FLOAT", values: "abc" }] }], /FLOAT needs a number/],
+    [[{ name: "tokens", variables: [{ name: "x", type: "BOOLEAN", values: 1 }] }], /BOOLEAN needs true or false/],
+    [[{ name: "tokens", variables: [{ name: "x", type: "COLOR", values: "red" }] }], /Invalid color/],
+    [[{ name: "tokens", variables: [{ name: "y", type: "COLOR", values: { alias: "palette/nope" } }] }], /alias target "palette\/nope" not found/],
+    [[{ name: "tokens", variables: [{ name: "z", type: "COLOR", values: { alias: "palette/space/4" } }] }], /cannot alias palette\/space\/4 \(FLOAT\)/],
+    [[{ variables: [] }], /needs a name/],
+    [[], /collections is required/],
+  ]) {
+    r = await call("create_variables", { collections: cols });
+    assert.equal(r.ok, false, J(cols)); assert.match(r.error, re, J(cols));
+  }
+  console.log("ok: create_variables");
+}
+
+// ======================= phase 3: fonts and imported pages
+{
+  const J = (v) => JSON.stringify(v);
+  const make = (spec, params = {}) => call("create", { spec, animate: false, ...params });
+
+  // style names are matched across spellings
+  fontsLoaded.length = 0;
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Poppins", fontStyle: "Semi Bold" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(J(nodes.get(r.result.rootId).fontName), J({ family: "Poppins", style: "SemiBold" }));
+  assert.ok(fontsLoaded.includes("Poppins SemiBold"));
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Inter", fontStyle: "SemiBold" });
+  assert.equal(J(nodes.get(r.result.rootId).fontName), J({ family: "Inter", style: "Semi Bold" }));
+  r = await make({ type: "TEXT", runs: [{ text: "x" }, { text: "y", fontFamily: "Poppins", fontStyle: "Semi Bold" }] });
+  assert.equal(r.ok, true, r.error);
+  const rn = await call("get_node", { id: r.result.rootId, depth: 0 });
+  assert.equal(rn.result.runs[1].fontStyle, "SemiBold");
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Poppins", fontStyle: "Bold" });
+  assert.equal(nodes.get(r.result.rootId).fontName.style, "Bold");
+  console.log("ok: font style spelling (SemiBold / Semi Bold)");
+
+  // a missing font: error by default, substitution with fallbackFont
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Missing Sans" });
+  assert.equal(r.ok, false); assert.match(r.error, /Font "Missing Sans Regular" is not available/);
+  r = await make({ type: "FRAME", children: [
+    { type: "TEXT", characters: "a", fontFamily: "Missing Sans", fontStyle: "Bold" },
+    { type: "TEXT", characters: "b", fontFamily: "Missing Sans", fontStyle: "Bold" },
+    { type: "TEXT", runs: [{ text: "c" }, { text: "d", fontFamily: "Missing Sans", fontStyle: "Semi Bold" }] },
+  ] }, { fallbackFont: "Inter" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(J(r.result.fontSubstitutions), J(["Missing Sans Bold -> Inter Bold", "Missing Sans Semi Bold -> Inter Semi Bold"]));
+  const kids = nodes.get(r.result.rootId).children;
+  assert.equal(J(kids[0].fontName), J({ family: "Inter", style: "Bold" }));
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Missing Sans" });
+  assert.equal(r.ok, false, "the fallback does not stay on after the call");
+  r = await make({ type: "TEXT", characters: "a", fontFamily: "Missing Sans" }, { fallbackFont: "Also Missing" });
+  assert.equal(r.ok, false); assert.match(r.error, /not available/);
+  console.log("ok: fallbackFont");
+
+  // a spec produced by the HTML converter (snapshot of test/fixtures/sample-page.html) is accepted as is
+  const fixture = JSON.parse(fs.readFileSync("test/fixtures/sample-page.spec.json", "utf8"));
+  const count = (n) => 1 + (n.children || []).reduce((a, c) => a + count(c), 0);
+  r = await make(fixture, { fallbackFont: "Inter" });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.result.created.length, count(fixture));
+  const page = nodes.get(r.result.rootId);
+  assert.equal(page.width, 1440); assert.equal(page.layoutMode, "VERTICAL");
+  const walk = (n, f) => { f(n); (n.children || []).forEach((c) => walk(c, f)); };
+  const byName = (name) => { let hit; walk(page, (n) => { if (n.name === name && !hit) hit = n; }); return hit; };
+  const hero = byName("section.hero");
+  assert.equal(hero.layoutSizingHorizontal, "FILL");
+  const badge = byName("span.badge");
+  assert.equal(badge.layoutPositioning, "ABSOLUTE"); assert.ok(badge.x > 1000 && badge.y === 40, "absolute x/y landed inside an auto-layout parent");
+  const line = byName("border-bottom");
+  assert.equal(line.layoutPositioning, "ABSOLUTE"); assert.equal(line.height, 1);
+  assert.ok(byName("spacer"), "spacer frames are created");
+  assert.equal(byName("svg").svgSource.startsWith("<svg"), true);
+  let h1; walk(page, (n) => { if (n.type === "TEXT" && n.characters && n.characters.startsWith("Kelola")) h1 = n; });
+  const h1n = await call("get_node", { id: h1.id, depth: 0 });
+  assert.equal(h1n.result.runs.length, 3); assert.equal(h1n.result.runs[1].color, "#2563EB"); assert.equal(h1n.result.fontName.family, "Poppins");
+  console.log("ok: converter output is accepted by the plugin");
+}
 
 console.log("\nPLUGIN MOCK TESTS PASSED");

@@ -14,6 +14,11 @@ Claude Desktop / Claude Code
 
 Server hanya mendengarkan di `127.0.0.1`, jadi tidak terbuka ke jaringan.
 
+> **English summary:** a Figma plugin plus a local MCP server that lets Claude (Claude Desktop or Claude Code) design directly in Figma: create and edit frames, text, auto layout, gradients, images, vectors, variables and components, import an HTML page as auto-layout frames, and export nodes as SVG/PNG. It talks to the plugin over a WebSocket on `127.0.0.1` only and needs no API key. Quick start: `npm install`, import `plugin/manifest.json` in Figma (Plugins → Development → Import plugin from manifest), add the server (`node server/index.js`) to your MCP client config, then open the plugin in Figma. The detailed guide below is in Indonesian. Requires Node.js 18+ and the Figma desktop app. Run `npm test` for the test suite.
+>
+> **Unofficial project:** not affiliated with or endorsed by Figma or Anthropic. Claude can modify your Figma file, so try it on a copy first. Licensed under MIT, see [LICENSE](LICENSE).
+
+
 ## Fitur
 
 - **Buat dan ubah desain**: frame, teks, shape, auto layout, gradient, shadow, sudut bulat, struktur bertingkat dalam satu perintah.

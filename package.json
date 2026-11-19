@@ -6,7 +6,7 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node test/smoke.js && node test/relay.js && node test/image.js"
+    "test": "node test/smoke.js && node test/relay.js && node test/image.js && node test/import-html.js && node test/plugin-mock.js && node test/html-converter.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer, WebSocket } from "ws";
 import { z } from "zod";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 
 const PORT = Number(process.env.FIGMA_BRIDGE_PORT || 3055);
@@ -181,8 +181,9 @@ startBridge();
 const mcp = new McpServer({ name: "figma-claude-bridge", version: "1.0.0" });
 
 // ------------------------------------------------------------- image loading
-// IMAGE fills may give `url` (http/https) or `path` (a file on this computer). The server reads
-// the bytes and hands them to the plugin as base64, since the plugin itself has no network/file access.
+// IMAGE fills may give `url` (http/https, or a data: URI), `path` (a file on this computer) or `base64`
+// (the bytes themselves, e.g. from a sandbox that cannot reach this computer's disks). The server reads
+// and checks the bytes and hands them to the plugin as base64, since the plugin has no network/file access.
 const MAX_IMAGE_BYTES = Number(process.env.FIGMA_BRIDGE_MAX_IMAGE_MB || 12) * 1024 * 1024;
 
 function sniffImage(buf) {
@@ -192,9 +193,26 @@ function sniffImage(buf) {
   return null;
 }
 
+// base64 text (optionally a "data:image/png;base64,..." URI) -> checked Buffer
+function decodeBase64Image(text, label) {
+  const m = /^data:[^,]*?(;base64)?,/i.exec(text);
+  let data = text;
+  if (m) {
+    if (!m[1]) throw new Error(`${label}: only base64 data: URIs are supported (data:image/png;base64,...)`);
+    data = text.slice(m[0].length);
+  }
+  data = data.replace(/\s+/g, "");
+  if (!/^[A-Za-z0-9+/_-]*={0,2}$/.test(data) || data.length < 8) {
+    throw new Error(`${label}: not valid base64 image data`);
+  }
+  return Buffer.from(data.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+}
+
 async function loadImage(src) {
   let buf;
-  if (/^https?:\/\//i.test(src)) {
+  if (/^data:/i.test(src)) {
+    buf = decodeBase64Image(src, "Image data: URI");
+  } else if (/^https?:\/\//i.test(src)) {
     let res;
     try {
       res = await fetch(src, { signal: AbortSignal.timeout(20000), redirect: "follow" });
@@ -214,14 +232,14 @@ async function loadImage(src) {
     if (info.size > MAX_IMAGE_BYTES) throw new Error(`Image is too large (${Math.round(info.size / 1048576)} MB, limit ${MAX_IMAGE_BYTES / 1048576} MB): ${src}`);
     buf = await readFile(file);
   }
-  if (buf.length > MAX_IMAGE_BYTES) throw new Error(`Image is too large (limit ${MAX_IMAGE_BYTES / 1048576} MB): ${src}`);
+  if (buf.length > MAX_IMAGE_BYTES) throw new Error(`Image is too large (limit ${MAX_IMAGE_BYTES / 1048576} MB): ${src.slice(0, 80)}`);
   if (!sniffImage(buf)) {
-    throw new Error(`Unsupported image format: ${src}. Figma accepts PNG, JPEG or GIF; convert WebP/SVG/other formats first.`);
+    throw new Error(`Unsupported image format: ${src.slice(0, 80)}. Figma accepts PNG, JPEG or GIF; convert WebP/SVG/other formats first.`);
   }
   return buf.toString("base64");
 }
 
-// Deep-walk any params object and replace IMAGE paints that have url/path with base64.
+// Deep-walk any params object and replace IMAGE paints that have url/path/base64 with checked base64.
 async function resolveImages(value, cache = new Map()) {
   if (Array.isArray(value)) {
     const out = [];
@@ -231,7 +249,15 @@ async function resolveImages(value, cache = new Map()) {
   if (value && typeof value === "object") {
     const out = {};
     for (const [k, v] of Object.entries(value)) out[k] = await resolveImages(v, cache);
-    if (out.type === "IMAGE" && !out.base64 && (out.url || out.path)) {
+    if (out.type === "IMAGE" && typeof out.base64 === "string") {
+      // raw bytes sent by the caller: validate them like any other source (format and size)
+      const raw = out.base64;
+      const key = "b64:" + raw.length + ":" + raw.slice(0, 64) + raw.slice(-32);
+      if (!cache.has(key)) cache.set(key, loadImage(raw.startsWith("data:") ? raw : "data:;base64," + raw));
+      out.base64 = await cache.get(key);
+      delete out.url;
+      delete out.path;
+    } else if (out.type === "IMAGE" && (out.url || out.path)) {
       const src = String(out.url || out.path);
       if (!cache.has(src)) cache.set(src, loadImage(src));
       out.base64 = await cache.get(src);
@@ -257,28 +283,45 @@ const wrap = (command, mapParams = (p) => p) => async (params) => {
 
 const NODE_SPEC_DOC = `
 Node spec (JSON object). Common fields:
-- type: FRAME | COMPONENT | RECTANGLE | ELLIPSE | TEXT | LINE | POLYGON | STAR  (default FRAME). COMPONENT is a frame that can be combined into variants with figma_combine_variants.
+- type: FRAME | COMPONENT | RECTANGLE | ELLIPSE | TEXT | LINE | POLYGON | STAR | VECTOR | SVG  (default FRAME). COMPONENT is a frame that can be combined into variants with figma_combine_variants.
+  VECTOR draws a path: {type:"VECTOR", path:"M 0 0 L 40 0 L 20 30 Z", fills?, strokes?, width?, height?} (or vectorPaths:[{data, windingRule:"NONZERO"|"EVENODD"}]). SVG path syntax: M L H V C S Q T Z, absolute or relative; arcs (A) are not supported, use an SVG node for those. width/height rescale the drawn path. With no fills and no strokes it gets a black fill. Combine shapes with figma_boolean.
+  SVG imports vector artwork (e.g. an icon): {type:"SVG", svg:"<svg ...>...</svg>", name?, x?, y?, width?, height?}. It creates a frame containing editable vectors; use parentId on figma_create to drop it into a slot.
 - name, x, y, width, height, rotation, opacity (0-1), visible
-- fills: "#RRGGBB" | "#RRGGBBAA" | [{type:"SOLID",color:"#hex",opacity?}] | [{type:"GRADIENT_LINEAR",stops:[{position:0,color:"#hex"},...],angle?:deg}] | "none"
-- image fill: fills:[{type:"IMAGE", url:"https://..." | path:"D:/foto/a.png" | fromNodeId:"12:34" | imageHash:"...", scaleMode:"FILL"|"FIT"|"CROP"|"TILE" (default FILL), opacity?}]
+- fills: "#RRGGBB" | "#RRGGBBAA" | [{type:"SOLID",color:"#hex",opacity?}] | [{type:"GRADIENT_LINEAR",stops:[{position:0,color:"#hex"},...], direction|cssAngle|angle}] | "none"
+  Linear gradient direction (pick ONE): direction:"to right"|"to bottom"|"to bottom right"|... (like CSS), or cssAngle:deg (CSS convention: 0 = to top, 90 = to right, 180 = to bottom),
+  or angle:deg (0 = left to right, 90 = top to bottom, 180 = right to left, 270 = bottom to top; clockwise; default 0).
+  Example: a hero fading from dark at the top to transparent at the bottom: {type:"GRADIENT_LINEAR", direction:"to bottom", stops:[{position:0,color:"#000000CC"},{position:1,color:"#00000000"}]}.
+  figma_get_node returns gradients as {type, angle, stops} in the same convention as angle.
+- image fill: fills:[{type:"IMAGE", url:"https://..." | path:"D:/foto/a.png" | base64:"..." | fromNodeId:"12:34" | imageHash:"...", scaleMode:"FILL"|"FIT"|"CROP"|"TILE" (default FILL), opacity?}]
   Put it on a RECTANGLE/ELLIPSE/FRAME (e.g. a rectangle with cornerRadius for a rounded photo). PNG, JPEG or GIF only, max 12 MB.
+  base64 (or a "data:image/png;base64,..." URI in url) sends the bytes themselves, for callers that cannot reach this computer's folders. Keep it small (a few hundred KB) since the data passes through the conversation.
   fromNodeId reuses the first image of an existing node (e.g. a photo from the source slot, see figma_get_slots content.images).
   The same fills format works in figma_update to swap an image. Fills can mix, e.g. [image, gradient overlay].
 - variables (design tokens): refer to a local Figma variable as "collection/name", e.g. "light/primary", "core/radius/md" (the variable name keeps its own slashes).
-  Colors: fills/strokes/textColor accept "var:light/primary" or [{type:"SOLID", variable:"light/primary", opacity?}].
+  Colors: fills/strokes/textColor accept "var:light/primary" or [{type:"SOLID", variable:"light/primary"}]. Opacity cannot be combined with a variable (Figma drops it or loses the color); use a variable whose value already has alpha.
   Numbers and other fields: bind:{cornerRadius:"core/radius/md", strokeWeight:"core/line/hairline", itemSpacing:"core/space/2", paddingLeft:"core/space/4", height:"core/control/md"}; use null to unbind.
   Works in figma_create and figma_update (see figma_rebind_variables to switch a copy to another collection). Unknown names fail with similar suggestions; figma_get_node shows bindings as "variable" on paints and "bound" on the node.
 - strokes: same format as fills (solid/gradient only); strokeWeight; strokeAlign: INSIDE|OUTSIDE|CENTER
 - cornerRadius (number) or topLeftRadius/topRightRadius/bottomLeftRadius/bottomRightRadius
-- effects: [{type:"DROP_SHADOW"|"INNER_SHADOW",color:"#hex",opacity?,x,y,blur,spread?}] or [{type:"LAYER_BLUR",blur}]
+- effects: [{type:"DROP_SHADOW"|"INNER_SHADOW",color:"#hex",opacity?,x,y,blur,spread?}] or [{type:"LAYER_BLUR",blur}]. figma_get_node returns effects in this same format.
+- type SVG: {type:"SVG", svg:"<svg ...>", recolor:"light/foreground", name, x, y}. Imports the SVG (currentColor becomes black) and, with "recolor", binds every stroke and solid fill inside it to that color variable. Put SVGs inside a COMPONENT to make an icon.
+- effects may have colorVariable:"light/ring" to bind the color to a variable (a focus ring is two DROP_SHADOW effects with spread 2 and 4, y 0, blur 0).
+- description (COMPONENT / COMPONENT_SET): text shown in Figma, used for the level ("Level: atom").
+- textStyle: name of a local text style, e.g. "text/sm" (see figma_create_text_style)
+- effectStyle: name of a local effect style, e.g. "elevation/2" (see figma_list_styles, figma_create_effect_style)
+- properties (INSTANCE only): component properties, e.g. {variant:"outline", disabled:"true"}
 - clipsContent (frames)
 Auto layout (frames): layoutMode "HORIZONTAL"|"VERTICAL"|"NONE", itemSpacing, padding (all sides) or paddingTop/Right/Bottom/Left,
   primaryAxisAlignItems MIN|CENTER|MAX|SPACE_BETWEEN, counterAxisAlignItems MIN|CENTER|MAX|BASELINE,
   layoutWrap "WRAP"|"NO_WRAP", primaryAxisSizingMode / counterAxisSizingMode "FIXED"|"AUTO".
+  A new auto-layout frame HUGS its content on every axis you do not size (no width/height, layoutSizing* or *AxisSizingMode); give width/height or layoutSizing "FILL" to override.
 Child sizing inside an auto-layout parent: layoutSizingHorizontal / layoutSizingVertical "FIXED"|"HUG"|"FILL", layoutGrow (0|1), layoutAlign.
+  layoutPositioning:"ABSOLUTE" takes the child out of the flow so x/y place it freely inside the parent (e.g. a badge or an image overlapping a card); the parent must be auto layout. x/y of the result are returned. Optional constraints:{horizontal,vertical} (MIN|CENTER|MAX|STRETCH|SCALE).
+Order: figma_create and figma_clone accept index (0 = first child) to insert at a position instead of the end; figma_update accepts index to reorder inside the current parent (or with parentId to move).
 Text: characters, fontSize, fontFamily (default "Inter"), fontStyle (default "Regular", e.g. "Bold", "Semi Bold"),
   textAlignHorizontal LEFT|CENTER|RIGHT|JUSTIFIED, textAlignVertical TOP|CENTER|BOTTOM, lineHeight (px number), letterSpacing (px number),
   textAutoResize "WIDTH_AND_HEIGHT"|"HEIGHT"|"NONE", textColor (shortcut for fills on TEXT).
+  Mixed styles in one text: runs:[{text:"Hemat ", fontStyle:"Regular"},{text:"30%", fontStyle:"Bold", color:"#E11D48", fontSize:28, textDecoration:"UNDERLINE", letterSpacing:0.5, lineHeight:32}] builds the text from the runs (characters is derived). Or style part of characters with ranges:[{start:0,end:5,fontStyle:"Bold",color:"#hex"}] (end exclusive). Per-run fields: fontSize, fontFamily, fontStyle, color, textDecoration NONE|UNDERLINE|STRIKETHROUGH, letterSpacing, lineHeight; unset fields keep the text's base style. figma_get_node returns runs when the styles differ.
 children: array of node specs (created recursively inside this node; frames only).
 Tip: build whole screens in ONE figma_create call using nested children instead of many tiny calls.`;
 
@@ -303,6 +346,215 @@ mcp.registerTool(
   wrap("get_selection")
 );
 
+// ------------------------------------------------------------- HTML import
+// figma_import_html: the plugin window turns HTML+CSS into a node spec (it needs a browser DOM to
+// measure the page); this server reads local files, inlines CSS, loads images and creates the design.
+const MAX_HTML_BYTES = 3 * 1024 * 1024;
+const MAX_CSS_BYTES = 2 * 1024 * 1024;
+
+function withinDir(file, dir) {
+  const rel = path.relative(dir, file);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+// Replace <link rel="stylesheet" href="..."> by the stylesheet's text, so the plugin can see it.
+async function inlineStylesheets(html, baseDir, warnings) {
+  const links = [...html.matchAll(/<link\b[^>]*>/gi)].filter((m) => /rel\s*=\s*["']?stylesheet/i.test(m[0]));
+  for (const m of links) {
+    const hrefMatch = /href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(m[0]);
+    const href = hrefMatch && (hrefMatch[1] ?? hrefMatch[2] ?? hrefMatch[3]);
+    if (!href) continue;
+    try {
+      let css, cssDir = null;
+      if (/^https?:\/\//i.test(href)) {
+        const res = await fetch(href, { signal: AbortSignal.timeout(15000), redirect: "follow" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        css = await res.text();
+      } else if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^file:/i.test(href)) {
+        throw new Error("unsupported URL");
+      } else {
+        const file = path.resolve(baseDir, decodeURIComponent(href.replace(/^file:\/+/, "").replace(/[?#].*$/, "")));
+        if (!withinDir(file, baseDir)) throw new Error("outside the HTML folder");
+        const info = await stat(file);
+        if (info.size > MAX_CSS_BYTES) throw new Error("stylesheet is larger than 2 MB");
+        css = await readFile(file, "utf8");
+        cssDir = path.dirname(file);
+      }
+      if (css.length > MAX_CSS_BYTES) throw new Error("stylesheet is larger than 2 MB");
+      if (cssDir) {
+        // url(...) inside the CSS is relative to the CSS file; make it relative to the HTML folder
+        css = css.replace(/url\(\s*(["']?)([^"')]+)\1\s*\)/gi, (all, q, u) => {
+          if (/^(data:|https?:|#|\/\/)/i.test(u)) return all;
+          const abs = path.resolve(cssDir, u);
+          return withinDir(abs, baseDir) ? `url("${path.relative(baseDir, abs).split(path.sep).join("/")}")` : all;
+        });
+      }
+      html = html.replace(m[0], () => `<style>/* ${href.replace(/\*\//g, "")} */\n${css.replace(/<\/style/gi, "<\\/style")}</style>`);
+    } catch (e) {
+      warnings.push(`Could not read stylesheet ${href}: ${e.message}`);
+    }
+  }
+  return html;
+}
+
+// Load every IMAGE fill of an imported spec. A picture that cannot be loaded becomes a grey placeholder
+// and a warning, so one missing file does not cancel the whole import.
+async function resolveImportImages(value, baseDir, warnings, cache = new Map()) {
+  if (Array.isArray(value)) {
+    const out = [];
+    for (const v of value) out.push(await resolveImportImages(v, baseDir, warnings, cache));
+    return out;
+  }
+  if (!value || typeof value !== "object") return value;
+  if (value.type === "IMAGE") {
+    let src = value.base64 ?? value.url ?? value.path;
+    try {
+      if (value.path !== undefined && !path.isAbsolute(src) && !/^[a-zA-Z]:[\\/]/.test(src)) {
+        if (!baseDir) throw new Error("it is a relative path and no baseDir was given");
+        const file = path.resolve(baseDir, src.replace(/^\/+/, ""));
+        if (!withinDir(file, baseDir)) throw new Error("it points outside the HTML folder");
+        src = file;
+      }
+      const key = String(src).slice(0, 200);
+      if (!cache.has(key)) cache.set(key, loadImage(String(src)));
+      const { url, path: _p, base64, ...rest } = value;
+      return { ...rest, base64: await cache.get(key) };
+    } catch (e) {
+      warnings.push(`Image skipped (grey placeholder): ${String(value.path ?? value.url ?? "inline data").slice(0, 80)}: ${e.message}`);
+      return "#E5E7EB";
+    }
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(value)) out[k] = await resolveImportImages(v, baseDir, warnings, cache);
+  return out;
+}
+
+mcp.registerTool(
+  "figma_import_html",
+  {
+    description:
+      "Turn an HTML page (with its CSS) into a Figma design: auto layout frames, text, colors, gradients, borders, radius, shadows, images and inline SVG. " +
+      "Use it to move a website or component from code into Figma. Give html (a string) or htmlPath (a file on this computer; its <link> stylesheets and relative images are loaded from the same folder). " +
+      "How it works: the page is rendered in the plugin window at `width` px and measured, so flexbox, grid and normal flow become auto layout when children stack in a row or a column (a grid becomes rows of a column); uneven margins become spacer frames; " +
+      "anything else is placed at absolute positions (layout:'absolute' does that for everything and matches the browser pixel for pixel but is not responsive). " +
+      "Text with mixed styles (<b>, <span style>, links) becomes one text with runs; button-like boxes become frames with padding around a text. " +
+      "It is an approximation: check the returned warnings (ignored ::before/::after, transforms, per-side borders, list bullets, fonts that are not installed...). " +
+      "Fonts: the font-family from CSS is used (Poppins, Inter...); a font Figma does not have falls back to fallbackFont (default Inter) and is reported in fontSubstitutions. " +
+      "Tip: for a long page import one section at a time with `selector` (e.g. '#pricing'), or use dryRun:true to look at the node spec first (then send edits with figma_create). " +
+      "The result is a normal Figma frame; use figma_get_node / figma_export to check it.",
+    inputSchema: {
+      html: z.string().optional().describe("HTML source. Use this or htmlPath."),
+      htmlPath: z.string().optional().describe("Path to an .html file on this computer, e.g. D:/proyek/index.html"),
+      css: z.string().optional().describe("Extra CSS to apply on top of the page"),
+      baseDir: z.string().optional().describe("Folder that relative image paths and stylesheets are resolved against (default: the folder of htmlPath)"),
+      width: z.number().min(100).max(4000).optional().describe("Page width in px (the browser viewport). Default 1440. Use 390 for a mobile layout."),
+      height: z.number().min(100).max(4000).optional().describe("Viewport height in px, used for vh units. Default 900."),
+      layout: z.enum(["auto", "absolute"]).optional().describe("auto (default): auto layout where possible. absolute: every box at its measured x/y."),
+      selector: z.string().optional().describe("CSS selector of the element to import (default: the page's single top-level element, or the whole body)"),
+      name: z.string().optional().describe("Name of the created frame"),
+      parentId: z.string().optional().describe("Parent node id. Default: current page."),
+      index: z.number().int().min(0).optional().describe("Position among the parent's children (0 = first)"),
+      fallbackFont: z.string().optional().describe("Font family used when a CSS font is not available in Figma. Default Inter; empty string = fail instead."),
+      dryRun: z.boolean().optional().describe("Only return the converted node spec and warnings; create nothing."),
+      animate: z.boolean().optional().describe("Build animation (default follows the plugin window; usually turn it off for big imports)"),
+      speed: z.enum(["fast", "normal", "slow"]).optional(),
+      select: z.boolean().optional().describe("Select and zoom to the new frame (default true)"),
+    },
+  },
+  async (params) => {
+    try {
+      if ((params.html === undefined) === (params.htmlPath === undefined)) throw new Error("Give exactly one of html or htmlPath");
+      let html = params.html;
+      let baseDir = params.baseDir ? path.resolve(params.baseDir) : undefined;
+      if (params.htmlPath !== undefined) {
+        const file = path.resolve(params.htmlPath);
+        let info;
+        try { info = await stat(file); } catch { throw new Error(`HTML file not found: ${params.htmlPath}`); }
+        if (!info.isFile()) throw new Error(`Not a file: ${params.htmlPath}`);
+        if (info.size > MAX_HTML_BYTES) throw new Error(`HTML file is too large (${Math.round(info.size / 1024)} KB, limit ${MAX_HTML_BYTES / 1048576} MB). Import a section with selector.`);
+        html = await readFile(file, "utf8");
+        baseDir = baseDir || path.dirname(file);
+      }
+      if (!html || !html.trim()) throw new Error("The HTML is empty");
+      if (html.length > MAX_HTML_BYTES) throw new Error(`The HTML is too large (limit ${MAX_HTML_BYTES / 1048576} MB). Import a section with selector.`);
+      const warnings = [];
+      if (baseDir) html = await inlineStylesheets(html, baseDir, warnings);
+      const conv = await callPlugin("html_to_spec", {
+        html, css: params.css, width: params.width, height: params.height, layout: params.layout, selector: params.selector, name: params.name,
+      });
+      warnings.push(...(conv.warnings || []));
+      const spec = await resolveImportImages(conv.spec, baseDir, warnings);
+      if (params.dryRun) return ok({ stats: conv.stats, warnings, spec });
+      const created = await callPlugin("create", {
+        spec, parentId: params.parentId, index: params.index, animate: params.animate, speed: params.speed, select: params.select,
+        fallbackFont: params.fallbackFont === undefined ? "Inter" : params.fallbackFont || undefined,
+      });
+      const out = { rootId: created.rootId, nodesCreated: created.created.length, stats: conv.stats, warnings };
+      if (created.fontSubstitutions) out.fontSubstitutions = created.fontSubstitutions;
+      return ok(out);
+    } catch (e) { return fail(e); }
+  }
+);
+
+mcp.registerTool(
+  "figma_boolean",
+  {
+    description:
+      "Combine shapes with a boolean operation (like Figma's Union / Subtract / Intersect / Exclude) into one new node. " +
+      "UNION merges all shapes; SUBTRACT cuts the shapes in front out of the shape at the back (stacking order decides, not the order of ids); " +
+      "INTERSECT keeps the overlap; EXCLUDE keeps everything except the overlap. Use flatten:true to turn the result into a single plain vector (a logo or icon that no longer needs its parts). " +
+      "Make the shapes with figma_create first (RECTANGLE, ELLIPSE, POLYGON, STAR or VECTOR with a path). Returns the new node.",
+    inputSchema: {
+      operation: z.enum(["UNION", "SUBTRACT", "INTERSECT", "EXCLUDE"]),
+      ids: z.array(z.string()).min(2).describe("Ids of the shapes to combine (at least 2)"),
+      name: z.string().optional().describe("Name of the result"),
+      parentId: z.string().optional().describe("Where to put the result (default: the parent of the first shape)"),
+      index: z.number().int().min(0).optional().describe("Position inside the parent (0 = first child)"),
+      flatten: z.boolean().optional().describe("Flatten the result into one vector (default false, which keeps the shapes editable)"),
+      props: z.record(z.any()).optional().describe("Properties to apply to the result, same as figma_update, e.g. {fills:'#111111', x:10, y:20}"),
+      select: z.boolean().optional().describe("Select the result (default true)"),
+    },
+  },
+  wrap("boolean")
+);
+
+mcp.registerTool(
+  "figma_create_variables",
+  {
+    description:
+      "Create or update local variables (design tokens) from a list: collections with modes, and variables with a value per mode. " +
+      "Safe to run again: collections and variables are matched by name and updated, never duplicated. " +
+      "Types: COLOR (\"#RRGGBB\" or \"#RRGGBBAA\"), FLOAT (number), STRING, BOOLEAN; type is inferred from the value when omitted. " +
+      "values is {modeName: value}, or a single value for the first mode. An alias to another variable is {alias:\"collection/name\"}; the target may be created in the same call. " +
+      "Names with slashes make groups, e.g. \"color/brand/primary\". Example: " +
+      '{collections:[{name:"core",modes:["Default"],variables:[{name:"blue/500",values:"#3B82F6"},{name:"radius/md",values:12}]},' +
+      '{name:"theme",modes:["Light","Dark"],variables:[{name:"primary",type:"COLOR",values:{Light:{alias:"core/blue/500"},Dark:"#60A5FA"},description:"Brand color"}]}]}. ' +
+      "Then use them in figma_create / figma_update as \"var:theme/primary\" or bind:{...} (see the node spec), and list them with figma_list_variables.",
+    inputSchema: {
+      collections: z
+        .array(
+          z.object({
+            name: z.string().min(1),
+            modes: z.array(z.string()).optional().describe("Mode names. A new collection's default mode is renamed to the first; missing modes are added; existing modes are kept."),
+            variables: z
+              .array(
+                z.object({
+                  name: z.string().min(1),
+                  type: z.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"]).optional(),
+                  values: z.any().optional().describe("{modeName: value | {alias:'collection/name'}} or one value for the first mode"),
+                  description: z.string().optional(),
+                  scopes: z.array(z.string()).optional().describe("Figma variable scopes, e.g. ['CORNER_RADIUS'] or ['ALL_FILLS']"),
+                })
+              )
+              .optional(),
+          })
+        )
+        .min(1),
+    },
+  },
+  wrap("create_variables")
+);
+
 mcp.registerTool(
   "figma_combine_variants",
   {
@@ -312,6 +564,7 @@ mcp.registerTool(
       "Returns the new component set. Create components with figma_create (type COMPONENT) first.",
     inputSchema: {
       ids: z.array(z.string()).min(1).describe("COMPONENT node ids to combine"),
+      depth: z.number().int().min(0).max(3).optional().describe("Child levels in the result (default 0, the set only)"),
       name: z.string().optional().describe("Name of the component set, e.g. Button"),
       parentId: z.string().optional().describe("Where to put the set (default: the parent of the first component)"),
     },
@@ -326,12 +579,15 @@ mcp.registerTool(
       "In a node and all its children, re-point every variable of one collection to the variable with the same name in " +
       'another collection, e.g. from "light" to "dark". Variables of other collections (such as "core") are unchanged. ' +
       "Use it to make a dark copy of a design: figma_clone the node, then rebind the copy. Returns how many bindings changed " +
-      "and the target variables that do not exist (those bindings stay as they were).",
+      "and the target variables that do not exist (those bindings stay as they were). Instances need `swap` (see below).",
     inputSchema: {
       id: z.string().describe("Node id (usually a freshly cloned frame, component or component set)"),
       from: z.string().describe('Collection to move away from, e.g. "light"'),
       to: z.string().describe('Collection to move to, e.g. "dark"'),
       name: z.string().optional().describe("Optional new name for the node"),
+      swap: z.record(z.string()).optional().describe(
+        'Instances: {"<component set id>":"<other component set id>"} switches each instance of a variant to the variant with the same properties in the other set, e.g. the light Button set to the dark one. Nothing inside an instance is rebound; instances without a swap are listed in `unswapped`.'
+      ),
     },
   },
   wrap("rebind_variables")
@@ -346,6 +602,125 @@ mcp.registerTool(
     inputSchema: {},
   },
   wrap("list_variables")
+);
+
+mcp.registerTool(
+  "figma_create_variable",
+  {
+    description:
+      "Create a variable in an existing collection, or update it if the name already exists there. " +
+      "COLOR value: \"#RRGGBB\" or \"#RRGGBBAA\"; {alias:\"collection/name\"} to point at another variable; or a composed color " +
+      "{color:\"collection/name\", opacity: 0-100 or \"collection/float-variable\"}, which keeps the color linked to that " +
+      "variable (e.g. light/success-subtle = light/success at 14%). FLOAT/STRING/BOOLEAN: the plain value. " +
+      "Optional description and scopes (e.g. [\"ALL_FILLS\"]). Uses the collection's first mode unless `mode` is given.",
+    inputSchema: {
+      collection: z.string().describe('Existing collection name, e.g. "light"'),
+      name: z.string().describe('Variable name inside the collection, e.g. "success-subtle" or "radius/md"'),
+      type: z.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"]),
+      value: z.any().optional().describe("See the tool description"),
+      description: z.string().optional(),
+      scopes: z.array(z.string()).optional(),
+      mode: z.string().optional().describe("Mode name (default: the first mode)"),
+    },
+  },
+  wrap("create_variable")
+);
+
+mcp.registerTool(
+  "figma_create_instance",
+  {
+    description:
+      "Create an instance of a component. `id` is a COMPONENT, or a COMPONENT_SET (then `variant` picks the variant, " +
+      'e.g. {variant:"outline", size:"md"}; every key must match). `props` are normal node props applied to the instance ' +
+      "(x, y, name, layoutSizingHorizontal, ...). Put it inside a parent with `parentId` (default: the current page). " +
+      'Change it later with figma_update props {properties:{variant:"destructive"}}.',
+    inputSchema: {
+      id: z.string().describe("COMPONENT or COMPONENT_SET node id"),
+      variant: z.record(z.string()).optional().describe("Variant property values to match in a component set"),
+      parentId: z.string().optional().describe("Parent node id. Default: current page."),
+      props: z.record(z.any()).optional().describe("Node props to apply to the instance"),
+      depth: z.number().int().min(0).max(4).optional().describe("Child levels in the result (default 1)"),
+    },
+  },
+  wrap("create_instance")
+);
+
+mcp.registerTool(
+  "figma_create_effect_style",
+  {
+    description:
+      "Create an effect style (e.g. the shadow \"elevation/2\"), or update it if the name exists. `effects` use the same " +
+      'format as node effects: [{type:"DROP_SHADOW", color:"#000000", opacity:0.12, x:0, y:8, blur:24, spread:0}]. ' +
+      'Apply it to a node with figma_create / figma_update prop effectStyle:"elevation/2".',
+    inputSchema: {
+      name: z.string().describe('Style name, e.g. "elevation/2"'),
+      effects: z.array(z.record(z.any())).describe("Effects, see the tool description"),
+      description: z.string().optional(),
+    },
+  },
+  wrap("create_effect_style")
+);
+
+mcp.registerTool(
+  "figma_create_text_style",
+  {
+    description:
+      'Create a text style (e.g. "text/sm"), or update it if the name exists. `bind` ties fields to variables, e.g. ' +
+      '{fontSize:"core/font-size/sm"}. Apply it to a text node with figma_create / figma_update prop textStyle:"text/sm".',
+    inputSchema: {
+      name: z.string(),
+      fontFamily: z.string().describe('e.g. "Geist"'),
+      fontStyle: z.string().optional().describe('e.g. "Medium" (default Regular)'),
+      fontSize: z.number(),
+      lineHeight: z.number().optional().describe("px"),
+      letterSpacing: z.number().optional().describe("px"),
+      bind: z.record(z.string()).optional().describe('field -> "collection/name", e.g. {fontSize:"core/font-size/sm"}'),
+      description: z.string().optional(),
+    },
+  },
+  wrap("create_text_style")
+);
+
+mcp.registerTool(
+  "figma_apply_text_styles",
+  {
+    description:
+      "Apply local text styles to every text node under `id` (a page, frame or component set). A text gets the style with " +
+      "the same font family, font style and size; the rest is reported as unmatched. Instance contents are skipped " +
+      "(they follow their main component). Use dryRun first: it only reports.",
+    inputSchema: {
+      id: z.string().describe("Root node id; 0:1 is the page"),
+      dryRun: z.boolean().optional(),
+    },
+  },
+  wrap("apply_text_styles")
+);
+
+mcp.registerTool(
+  "figma_list_styles",
+  {
+    description: "List the local effect, text and paint styles in the current file (id and name). Read-only.",
+    inputSchema: {},
+  },
+  wrap("list_styles")
+);
+
+mcp.registerTool(
+  "figma_arrange_variants",
+  {
+    description:
+      "Lay out the variants of a component set in a tidy grid and resize the set to fit. `rows` and `columns` are variant " +
+      'property names (e.g. rows ["variant"], columns ["size","disabled"]); a variant goes in the cell given by its values, ' +
+      "ordered like the property's values. Only combinations that exist get a row or column, each sized to its largest " +
+      "variant. gapX and gapY default to 24, padding to 0.",
+    inputSchema: {
+      id: z.string().describe("COMPONENT_SET node id"),
+      rows: z.array(z.string()).optional().describe("Variant properties that define the rows (default: one row)"),
+      columns: z.array(z.string()).optional().describe("Variant properties that define the columns (default: one column)"),
+      gapX: z.number().optional(), gapY: z.number().optional(), padding: z.number().optional(),
+    },
+  },
+  wrap("arrange_variants")
 );
 
 mcp.registerTool(
@@ -388,13 +763,30 @@ mcp.registerTool(
 mcp.registerTool(
   "figma_get_node",
   {
-    description: "Get a node by id (e.g. '12:34'), including its properties and children up to `depth`. Use no id for the current page.",
+    description:
+      "Get a node by id (e.g. '12:34'), including its properties (fills, strokes, effects, auto layout, text, variable bindings) and children up to `depth`. " +
+      "Use no id for the current page. To just see what is on a page, figma_list_children is lighter.",
     inputSchema: {
       id: z.string().optional().describe("Node id. Omit for the current page."),
       depth: z.number().int().min(0).max(6).optional().describe("Child levels to include (default 2)"),
     },
   },
   wrap("get_node")
+);
+
+mcp.registerTool(
+  "figma_list_children",
+  {
+    description:
+      "List the direct children of a page or node: id, name, type, x, y, width, height, childCount. " +
+      "No arguments = the current page; pageName = another page by name; id = any node (a page id also works). " +
+      "Use it to find ids before figma_get_node, figma_update or figma_clone.",
+    inputSchema: {
+      id: z.string().optional().describe("Node or page id"),
+      pageName: z.string().optional().describe("Page name (case-insensitive), e.g. 'Web Flow'"),
+    },
+  },
+  wrap("list_children")
 );
 
 mcp.registerTool(
@@ -405,6 +797,7 @@ mcp.registerTool(
     inputSchema: {
       spec: z.record(z.any()).describe("Node spec object, see description"),
       parentId: z.string().optional().describe("Parent node id. Default: current page."),
+      index: z.number().int().min(0).optional().describe("Position among the parent's children (0 = first). Default: end."),
       select: z.boolean().optional().describe("Select and zoom to the new node (default true)"),
       animate: z.boolean().optional().describe(
         "Play a build animation: nodes fade in one by one, in order, as if the design is being drawn live. " +
@@ -442,10 +835,11 @@ mcp.registerTool(
 mcp.registerTool(
   "figma_clone",
   {
-    description: "Duplicate a node. Optionally place the copy into another parent and/or offset it.",
+    description: "Duplicate a node. Optionally place the copy into another parent, at a position (index) and/or offset it.",
     inputSchema: {
       id: z.string(),
       parentId: z.string().optional(),
+      index: z.number().int().min(0).optional().describe("Position among the parent's children (0 = first). Default: next to the original, or the end of parentId."),
       x: z.number().optional(),
       y: z.number().optional(),
     },
@@ -465,16 +859,40 @@ mcp.registerTool(
 mcp.registerTool(
   "figma_export",
   {
-    description: "Export a node as an image so you can look at the result. Returns the image.",
+    description:
+      "Export a node. PNG/JPG returns an image so you can look at the result. SVG returns the vector markup as text " +
+      "(logos and icons you want to copy into code or into another design); pass savePath (a .svg file on this computer) " +
+      "to also write it to disk.",
     inputSchema: {
       id: z.string().describe("Node id to export"),
-      format: z.enum(["PNG", "JPG"]).optional().describe("Default PNG"),
-      scale: z.number().min(0.1).max(4).optional().describe("Default 1"),
+      format: z.enum(["PNG", "JPG", "SVG"]).optional().describe("Default PNG"),
+      scale: z.number().min(0.1).max(4).optional().describe("PNG/JPG only. Default 1"),
+      outlineText: z.boolean().optional().describe("SVG only: convert text to outlines (default true, so fonts are not needed). false keeps <text>."),
+      includeIds: z.boolean().optional().describe("SVG only: keep layer names as id attributes (default false)"),
+      savePath: z.string().optional().describe("SVG only: write the SVG to this .svg path, e.g. D:/proyek/img/logo.svg (folders are created)"),
     },
   },
   async (params) => {
     try {
-      const r = await callPlugin("export", params);
+      const { savePath, ...pluginParams } = params;
+      if (savePath && params.format !== "SVG") throw new Error("savePath only works with format SVG");
+      if (savePath && !/\.svg$/i.test(savePath)) throw new Error("savePath must end in .svg");
+      const r = await callPlugin("export", pluginParams);
+      if (typeof r.svg === "string") {
+        let saved = "";
+        if (savePath) {
+          const file = path.resolve(savePath);
+          await mkdir(path.dirname(file), { recursive: true });
+          await writeFile(file, r.svg, "utf8");
+          saved = `\nSaved to ${file}`;
+        }
+        return {
+          content: [
+            { type: "text", text: `Exported ${r.name} as SVG (${r.width}x${r.height}, ${r.svg.length} characters).${saved}` },
+            { type: "text", text: r.svg },
+          ],
+        };
+      }
       return {
         content: [
           { type: "image", data: r.base64, mimeType: r.mimeType },

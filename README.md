@@ -65,7 +65,7 @@ Pilih salah satu.
 
 **Claude Desktop**
 
-1. Buka **Settings → Developer → Edit Config**. File `claude_desktop_config.json` akan terbuka.
+1. Buka **Settings → Desktop app**, scroll ke bawah ke baris **Extensions**, klik **Manage**. Di halaman itu, bagian **Local MCP servers**, klik **Edit config** (di versi lama menunya bernama **Developer**). Folder yang berisi `claude_desktop_config.json` akan terbuka; buka file itu dengan editor teks (Notepad/VS Code).
 2. Tambahkan blok `figma-bridge` (jika `mcpServers` sudah ada isinya, tambahkan saja di dalamnya):
 
 ```json
@@ -80,7 +80,7 @@ Pilih salah satu.
 ```
 
 3. Simpan, lalu **tutup Claude Desktop sepenuhnya**, termasuk dari system tray (klik kanan ikonnya → Quit), dan buka lagi.
-4. Cek di **Settings → Developer**: `figma-bridge` harus berstatus *running*.
+4. Cek di **Settings → Desktop app → Extensions → Manage → Local MCP servers**: `figma-bridge` harus berstatus *Running*.
 
 **Claude Code**
 
@@ -259,7 +259,7 @@ Properti node yang didukung (ringkas): `type` (FRAME, COMPONENT, RECTANGLE, ELLI
 **Mematikan**
 
 1. Tutup jendela **Claude Bridge** di Figma (tombol X). Claude tidak bisa lagi mengubah file Figma-mu.
-2. Server MCP berjalan bersama Claude Desktop dan berhenti saat aplikasinya ditutup. Untuk menonaktifkan tanpa menutup aplikasi: **Settings → Developer**, lalu matikan atau hapus `figma-bridge`.
+2. Server MCP berjalan bersama Claude Desktop dan berhenti saat aplikasinya ditutup. Untuk menonaktifkan tanpa menutup aplikasi: **Settings → Desktop app → Extensions → Manage → Local MCP servers**, lalu matikan atau hapus `figma-bridge`.
 
 **Memperbarui setelah `git pull`**
 
@@ -275,7 +275,7 @@ Properti node yang didukung (ringkas): `type` (FRAME, COMPONENT, RECTANGLE, ELLI
 | `figma-bridge` berstatus **Failed** / "Connection closed" | Klik **View logs**. Pastikan path di konfigurasi benar (pakai `/`), `npm install` sudah dijalankan, dan Node.js terpasang. Lalu restart Claude Desktop sepenuhnya. |
 | Figma: `Manifest error: Invalid value for devAllowedDomains` | Figma menolak alamat IP. `devAllowedDomains` harus `["ws://localhost:3055"]` (sudah begitu di repo ini). |
 | Claude menjawab "Figma plugin is not connected" | Jendela plugin belum dibuka atau tertutup. Buka lagi lewat Plugins → Development → Claude Bridge sampai titik hijau. Perbarui ke versi terbaru (ada dukungan relay untuk beberapa instance server). |
-| Titik di jendela plugin tetap merah | Server belum jalan (cek `figma-bridge` di Settings → Developer), atau port berbeda. Samakan kolom **Port** di jendela plugin dengan `FIGMA_BRIDGE_PORT` (default 3055). |
+| Titik di jendela plugin tetap merah | Server belum jalan (cek `figma-bridge` di Settings → Desktop app → Extensions → Manage → Local MCP servers), atau port berbeda. Samakan kolom **Port** di jendela plugin dengan `FIGMA_BRIDGE_PORT` (default 3055). |
 | Port 3055 dipakai | Set `FIGMA_BRIDGE_PORT` di environment server, isi port yang sama di jendela plugin, dan ubah `devAllowedDomains` di `plugin/manifest.json` menjadi `ws://localhost:PORT`. |
 | `Font "..." is not available` | Font itu tidak ada di Figma. Pakai font yang terpasang (mis. `Inter` dengan `Regular`/`Medium`/`Semi Bold`/`Bold`). `Semi Bold` dan `SemiBold` sudah dicocokkan otomatis. Untuk impor HTML font cadangan dipakai otomatis. |
 | `Unknown command: html_to_spec` | Jendela plugin masih versi lama. Tutup dan buka lagi dari Plugins → Development. |
